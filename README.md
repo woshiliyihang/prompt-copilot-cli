@@ -202,4 +202,4 @@ Contributions are welcome. Please feel free to open an issue or submit a pull re
 
 ## 📄 License
 
-This project does not currently declare a specific license. If you plan to distribute or reuse it publicly, please add an appropriate license file.
+Apache License 2.0
