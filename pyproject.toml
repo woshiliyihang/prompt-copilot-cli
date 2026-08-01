@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prompt-copilot-cli"
+version = "0.1.6"
+description = "A lightweight terminal-based coding agent with file tools, command execution, multimodal image support, and MCP integration."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.15"
+authors = [{ name = "Jason Li" }]
+keywords = ["cli", "agent", "openai", "mcp", "coding-assistant"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "mcp>=1.28.0,<2.0.0",
+  "openai>=1.109.1,<2.0.0",
+  "prompt_toolkit>=3.0.52,<4.0.0",
+  "rich>=15.0.0,<16.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/woshiliyihang/prompt-copilot-cli"
+Repository = "https://github.com/woshiliyihang/prompt-copilot-cli"
+Issues = "https://github.com/woshiliyihang/prompt-copilot-cli/issues"
+
+[project.scripts]
+prompt-copilot = "main:main"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["main"]

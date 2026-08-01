@@ -1,0 +1,71 @@
+Prompt Copilot Release and Usage Guide
+====================================
+
+1. Install from PyPI
+--------------------
+
+Install the package with:
+
+    pip install prompt-copilot-cli
+
+Run the CLI with:
+
+    prompt-copilot
+
+2. Run from source
+------------------
+
+In the project root directory, run:
+
+    py main.py
+
+3. Common CLI options
+---------------------
+
+Show help:
+
+    py main.py -h
+    py main.py --help
+
+Show version:
+
+    py main.py -v
+    py main.py --version
+
+4. Build and validate locally
+------------------------------
+
+From the project root:
+
+    py scripts/release.py --skip-upload
+
+This will:
+- read the version from main.py
+- update pyproject.toml
+- clean old build artifacts
+- build wheel and sdist
+- run twine check
+
+5. Publish to PyPI
+------------------
+
+Use a PyPI token:
+
+    py scripts/release.py --pypi-token <your-token>
+
+If the current version is already published, the script will skip upload automatically.
+
+6. Environment variable option
+-------------------------------
+
+You can also set the token in the environment:
+
+    set PYPI_TOKEN=<your-token>
+    py scripts/release.py
+
+7. Notes
+--------
+
+- The package entry point is: prompt-copilot
+- The project version is managed from main.py
+- The release script is located at scripts/release.py
