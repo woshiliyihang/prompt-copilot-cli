@@ -1719,7 +1719,7 @@ def main() -> None:
         console.print(Panel.fit(t("debug_enabled_message"), title=t("debug_config_title")))
 
     # Create conversation recorder to persist recent rounds to markdown
-    recorder = ConversationRecorder(ROOT / "recent_conversations.md", max_rounds=50)
+    recorder = ConversationRecorder(ROOT / "recent_conversations.md", max_rounds=188)
 
     if args.task:
         try:
