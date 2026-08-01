@@ -17,11 +17,66 @@ class CLITests(unittest.TestCase):
         self.assertTrue(main.looks_like_background_service_command("uvicorn main:app --reload"))
         self.assertFalse(main.looks_like_background_service_command("python -m pytest"))
 
+    def test_execute_command_uses_background_execution_by_default(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_start_background_process(command, cwd, timeout_seconds=None, output_log_path=None):
+            captured["command"] = command
+            captured["cwd"] = cwd
+            captured["timeout_seconds"] = timeout_seconds
+            captured["output_log_path"] = output_log_path
+            return {
+                "status": "ok",
+                "content": "started",
+                "pid": 1234,
+                "cwd": cwd,
+                "log_path": output_log_path,
+            }
+
+        original = main.start_background_process
+        main.start_background_process = fake_start_background_process
+        try:
+            result = main.execute_tool_call(types.SimpleNamespace(function=types.SimpleNamespace(
+                name="execute_command",
+                arguments={"command": "python -m pytest", "cwd": "."},
+            )))
+        finally:
+            main.start_background_process = original
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(captured["command"], "python -m pytest")
+        self.assertEqual(captured["cwd"], str(Path.cwd()))
+        self.assertIsNotNone(captured["output_log_path"])
+        self.assertEqual(result["log_path"], captured["output_log_path"])
+
     def test_plan_prompt_includes_command_classification_guidance(self) -> None:
         prompt = main.plan_user_request.__code__.co_consts
         joined = " ".join(str(item) for item in prompt if isinstance(item, str))
         self.assertIn("短时命令", joined)
         self.assertIn("持久命令", joined)
+
+    def test_special_commands_skip_planning(self) -> None:
+        called = {"value": False}
+
+        def fake_chat_once(client, model, messages, temperature, debug_enabled=False):
+            called["value"] = True
+            return types.SimpleNamespace(content="should not be used")
+
+        original_chat_once = main.chat_once
+        main.chat_once = fake_chat_once
+        try:
+            planned = main.plan_user_request(
+                client=object(),
+                model="gpt-4o-mini",
+                history=[],
+                user_text="/task-start",
+                debug_enabled=False,
+            )
+        finally:
+            main.chat_once = original_chat_once
+
+        self.assertEqual(planned, "/task-start")
+        self.assertFalse(called["value"])
 
     def test_plan_user_request_uses_generated_plan(self) -> None:
         captured: dict[str, object] = {}

@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -111,8 +112,8 @@ ZH_SYSTEM_PROMPT = """
 12、在执行命令前，先判断该命令是短时命令还是持久命令：短时命令如 ls、pytest、python -m compileall 等应同步执行并等待结果；持久命令如 npm run dev、python app.py、uvicorn、flask run、serve、http.server 等会持续运行，应该优先以后台方式启动，并在必要时用健康检查确认服务已就绪。
 
 """
-EN_SYSTEM_PROMPT = """You are a CLI-based coding agent named Jason Li, focused on completing development tasks by using files, commands, Python scripts, and other tools.\n\nWorking principles:\n1. First inspect the working directory and understand the requirement.\n2. Prefer using network search tools for real-time information, such as weather, news, or other current topics.\n3. All code file creation, editing, and deletion operations are performed in the working directory. If the user does not specify a directory, the project root is used by default.\n4. If needed, provide concise explanations and next-step suggestions.\n5. If the task involves deleting system files or executing dangerous commands, you must ask for confirmation first.\n6. When the user enters /task-start, respond with: Please enter your first initial prompt.\n7. When information is missing, do not speculate; prefer using search tools to fill the gap and keep the answer precise and evidence-based.\n8. If the user wants to read or recognize other binary files, you must clearly state that you cannot directly read or understand generic binary file contents.\n9. If the user wants to inspect image content, you should first use the image-reading tool to convert the image into base64 or a visual-message format and then send it to a multimodal-capable model.\n10. For image-related tasks, prefer the image tool rather than trying to read the raw binary contents directly.\n11. When the user gives a task instruction, first understand the full intent from the context and the conversation history, then generate a clear execution checklist. After that, follow the checklist step by step to complete the task. After each step, provide the current execution status and progress to the user.
-12. Before executing a command, first determine whether it is a short-lived command or a persistent one: short-lived commands such as ls, pytest, and python -m compileall should be executed synchronously and awaited; persistent commands such as npm run dev, python app.py, uvicorn, flask run, serve, and http.server will keep running, so they should be started in the background and, when needed, checked for readiness with a health check. If a command may keep running, state this explicitly in the plan and choose the background-start approach."""
+EN_SYSTEM_PROMPT = """You are a CLI-based coding agent named Jason Li, focused on completing development tasks by using files, commands, Python scripts, and other tools.\n\nWorking principles:\n1. First inspect the working directory and understand the requirement.\n2. Prefer using network search tools for real-time information, such as weather, news, or other current topics.\n3. All code file creation, editing, and deletion operations are performed in the working directory. If the user does not specify a directory, the project root is used by default.\n4. If needed, provide concise explanations and next-step suggestions.\n5. If the task involves deleting system files or executing dangerous commands, you must ask for confirmation first.\n6. When the user enters /task-start, respond with: Please enter your first initial prompt.\n7. When information is missing, do not speculate; prefer using search tools to fill the gap and keep the answer precise and evidence-based.\n8. If the user wants to read or recognize other binary files, you must clearly state that you cannot directly read or understand generic binary file contents.\n9. If the user wants to inspect image content, you should first use the image-reading tool to convert the image into base64 or a visual-message format and then send it to a multimodal-capable model.\n10. For image-related tasks, prefer the image tool rather than trying to read the raw binary contents directly.\n11. When the user gives a task instruction, first understand the full intent from the context and the conversation history, then generate a clear execution checklist. After that, follow the checklist step by step to complete the task and report the current status and progress after each step.
+12. Before executing a command, first determine whether it is a short-lived command or a persistent one: short-lived commands such as ls, pytest, and python -m compileall should be executed synchronously and awaited; persistent commands such as npm run dev, python app.py, uvicorn, flask run, serve, and http.server will keep running, so they should be started in the background and, when needed, checked for readiness with a health check."""
 
 
 TRANSLATIONS = {
@@ -438,6 +439,8 @@ TOOL_DEFINITIONS = [
                 "properties": {
                     "command": {"type": "string", "description": t("command_desc")},
                     "cwd": {"type": "string", "description": t("cwd_desc")},
+                    "timeout_seconds": {"type": "integer", "description": "Maximum runtime in seconds before the background process is terminated automatically."},
+                    "output_log_path": {"type": "string", "description": "Optional path to a log file where stdout/stderr will be written."},
                 },
                 "required": ["command", "cwd"],
             },
@@ -984,11 +987,53 @@ def looks_like_background_service_command(command: Any) -> bool:
     return False
 
 
-def start_background_process(command: Any, cwd: str) -> dict[str, Any]:
+def stream_background_process_output(process: subprocess.Popen[Any], log_path: str | os.PathLike[str]) -> None:
+    log_file = Path(log_path)
+
+    def _watch_output() -> None:
+        last_position = 0
+        try:
+            if log_file.exists():
+                last_position = log_file.stat().st_size
+        except Exception:
+            last_position = 0
+
+        while process.poll() is None:
+            try:
+                if log_file.exists():
+                    with log_file.open("r", encoding="utf-8", errors="replace") as handle:
+                        handle.seek(last_position)
+                        chunk = handle.read()
+                        if chunk:
+                            last_position = handle.tell()
+                            if chunk.strip():
+                                console.print(chunk.rstrip(), style="dim")
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        try:
+            if log_file.exists():
+                with log_file.open("r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(last_position)
+                    chunk = handle.read()
+                    if chunk and chunk.strip():
+                        console.print(chunk.rstrip(), style="dim")
+        except Exception:
+            pass
+
+    threading.Thread(target=_watch_output, daemon=True).start()
+
+
+def start_background_process(command: Any, cwd: str, timeout_seconds: int | None = None, output_log_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     safe_cwd = resolve_execution_cwd(cwd, Path.cwd())
+    log_path = Path(output_log_path).expanduser() if output_log_path else ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    log_handle = log_path.open("a", encoding="utf-8")
     startup_kwargs: dict[str, Any] = {
         "cwd": safe_cwd,
-        "stdout": subprocess.DEVNULL,
+        "stdout": log_handle,
         "stderr": subprocess.STDOUT,
         "text": True,
         "encoding": "utf-8",
@@ -1005,13 +1050,45 @@ def start_background_process(command: Any, cwd: str) -> dict[str, Any]:
             process = subprocess.Popen(str(command), shell=True, start_new_session=True, **startup_kwargs)
     except (FileNotFoundError, NotADirectoryError, OSError) as exc:
         logger.warning(t("tool_subprocess_failed"), cwd, safe_cwd, exc)
+        try:
+            log_handle.close()
+        except Exception:
+            pass
         return {"status": "error", "content": str(exc)}
+
+    try:
+        log_handle.flush()
+        log_handle.close()
+    except Exception:
+        pass
+
+    if timeout_seconds is not None and timeout_seconds > 0:
+        def _watch_timeout() -> None:
+            try:
+                time.sleep(timeout_seconds)
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                    with log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(f"\n[timeout] process terminated after {timeout_seconds}s\n")
+            except Exception:
+                pass
+
+        threading.Thread(target=_watch_timeout, daemon=True).start()
+
+    console.print(Panel.fit(f"Streaming background output to {log_path}", title="Background process"))
+    stream_background_process_output(process, log_path)
 
     return {
         "status": "ok",
         "content": f"Started background process (pid={process.pid})",
         "pid": process.pid,
         "cwd": safe_cwd,
+        "log_path": str(log_path),
     }
 
 
@@ -1090,7 +1167,28 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
         path = Path(file_path).expanduser()
         if not path.is_absolute():
             path = Path.cwd() / path
-        result = {"status": "ok", "content": path.read_text(encoding="utf-8") if path.exists() else f"File does not exist: {path}"}
+        if not path.exists():
+            result = {"status": "error", "content": f"File does not exist: {path}"}
+            logger.info("read_file result: %s", result)
+            return result
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            result = {
+                "status": "error",
+                "content": f"Unable to read as UTF-8 text: {path}\nThis file may be binary or encoded in another charset.",
+            }
+            logger.warning("read_file failed due to non-UTF8 content: %s", path)
+            logger.info("read_file result: %s", result)
+            return result
+        except Exception as exc:
+            result = {"status": "error", "content": f"Failed to read file: {path}\n{exc}"}
+            logger.exception("read_file failed: %s", path)
+            logger.info("read_file result: %s", result)
+            return result
+
+        result = {"status": "ok", "content": content}
         logger.info("read_file result: %s", result)
         return result
 
@@ -1259,29 +1357,37 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("execute_command missing command argument, raw args: %s", args)
             return result
         cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
-        background = bool(args.get("background", False))
-        if background or looks_like_background_service_command(command):
-            result = start_background_process(command, cwd)
-            if result.get("status") == "ok":
-                health_check_url = args.get("health_check_url")
-                if health_check_url:
+
+        timeout_seconds = None
+        timeout_value = args.get("timeout_seconds") or args.get("timeout")
+        if timeout_value is not None:
+            try:
+                timeout_seconds = int(timeout_value)
+            except (TypeError, ValueError):
+                timeout_seconds = None
+
+        output_log_path = args.get("output_log_path") or args.get("log_path")
+        if not output_log_path:
+            output_log_path = ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+        result = start_background_process(command, cwd, timeout_seconds=timeout_seconds, output_log_path=output_log_path)
+        if result.get("status") == "ok":
+            health_check_url = args.get("health_check_url")
+            if health_check_url:
+                try:
                     ready = wait_for_health_check(str(health_check_url), timeout_seconds=int(args.get("health_check_timeout", 20)))
                     result["health_check_ready"] = ready
                     result["content"] = (
                         f"Started background process (pid={result['pid']})"
                         + (" and confirmed health check succeeded." if ready else " but health check did not succeed yet.")
                     )
+                except Exception:
+                    result["health_check_ready"] = False
+                    result["content"] = f"Started background process (pid={result['pid']})"
             logger.info("execute_command background result: %s", result)
             return result
 
-        returncode, stdout, stderr = run_subprocess_command(command, cwd, shell=True, timeout=TOOL_SUBPROCESS_TIMEOUT)
-        response = {
-            "status": "ok" if returncode == 0 else "error",
-            "content": stdout + stderr,
-            "returncode": returncode,
-        }
-        logger.info("execute_command result: %s", response)
-        return response
+        logger.info("execute_command result: %s", result)
+        return result
 
     if name == "execute_python_script":
         script = args.get("script")
@@ -1551,6 +1657,9 @@ def parse_tool_calls_from_content(content: str | None) -> list[Any]:
 
 
 def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]], user_text: str, debug_enabled: bool = False) -> str:
+    if is_special_command(user_text):
+        return user_text
+
     planning_prompt = (
         "你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。\n\n"
         "在生成任务执行计划时，请遵循以下工作原则：\n"
@@ -1585,14 +1694,23 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
     return (assistant_message.content or "").strip() or user_text
 
 
+def is_special_command(user_text: str) -> bool:
+    normalized = (user_text or "").strip()
+    if not normalized:
+        return False
+    special_commands = {"/exit", "/clear", "/task-start", "/task-end"}
+    return normalized in special_commands
+
+
 def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, user_text: str, debug_enabled: bool = False, recorder: ConversationRecorder | None = None) -> None:
     reset_interruption_state()
     history = session_store.load()
     planned_user_text = user_text
-    try:
-        planned_user_text = plan_user_request(client, model, history, user_text, debug_enabled=debug_enabled)
-    except Exception:
-        logger.exception("Planning step failed; continuing with original user input")
+    if not is_special_command(user_text):
+        try:
+            planned_user_text = plan_user_request(client, model, history, user_text, debug_enabled=debug_enabled)
+        except Exception:
+            logger.exception("Planning step failed; continuing with original user input")
 
     first_task_prompt = {"role": "user", "content": planned_user_text}
     history.append(first_task_prompt)
