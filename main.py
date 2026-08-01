@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -92,10 +93,32 @@ def build_bottom_toolbar_text() -> str:
     return f"{token_summary} | {base}"
 
 
+ZH_SYSTEM_PROMPT = """
+你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。
+
+工作原则：
+1、先检查工作目录并理解需求。
+2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。
+3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。
+4、如果需要，输出简洁的说明与下一步建议。
+5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。
+6、当用户输入指令：/task-start 的时候,直接回复：请输入你的第一条初始提示。
+7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。
+8、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
+9、如果用户想“查看图片内容”，应优先调用图片读取工具将图片转成 base64 或视觉消息格式，再将其发送给支持多模态的模型。
+10、对于图片类任务，优先使用图片工具而不是尝试直接读取二进制原始内容。
+11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时每个步骤执行完毕要反馈状态和进度。
+12、在执行命令前，先判断该命令是短时命令还是持久命令：短时命令如 ls、pytest、python -m compileall 等应同步执行并等待结果；持久命令如 npm run dev、python app.py、uvicorn、flask run、serve、http.server 等会持续运行，应该优先以后台方式启动，并在必要时用健康检查确认服务已就绪。
+
+"""
+EN_SYSTEM_PROMPT = """You are a CLI-based coding agent named Jason Li, focused on completing development tasks by using files, commands, Python scripts, and other tools.\n\nWorking principles:\n1. First inspect the working directory and understand the requirement.\n2. Prefer using network search tools for real-time information, such as weather, news, or other current topics.\n3. All code file creation, editing, and deletion operations are performed in the working directory. If the user does not specify a directory, the project root is used by default.\n4. If needed, provide concise explanations and next-step suggestions.\n5. If the task involves deleting system files or executing dangerous commands, you must ask for confirmation first.\n6. When the user enters /task-start, respond with: Please enter your first initial prompt.\n7. When information is missing, do not speculate; prefer using search tools to fill the gap and keep the answer precise and evidence-based.\n8. If the user wants to read or recognize other binary files, you must clearly state that you cannot directly read or understand generic binary file contents.\n9. If the user wants to inspect image content, you should first use the image-reading tool to convert the image into base64 or a visual-message format and then send it to a multimodal-capable model.\n10. For image-related tasks, prefer the image tool rather than trying to read the raw binary contents directly.\n11. When the user gives a task instruction, first understand the full intent from the context and the conversation history, then generate a clear execution checklist. After that, follow the checklist step by step to complete the task. After each step, provide the current execution status and progress to the user.
+12. Before executing a command, first determine whether it is a short-lived command or a persistent one: short-lived commands such as ls, pytest, and python -m compileall should be executed synchronously and awaited; persistent commands such as npm run dev, python app.py, uvicorn, flask run, serve, and http.server will keep running, so they should be started in the background and, when needed, checked for readiness with a health check. If a command may keep running, state this explicitly in the plan and choose the background-start approach."""
+
+
 TRANSLATIONS = {
     "system_prompt": {
-        "zh": """你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本工具完成开发任务。\n\n工作原则：\n1、先检查工作目录并理解需求。\n2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。\n3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。\n4、如果需要，输出简洁的说明与下一步建议。\n5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。\n6、当用户输入指令：/task-start 的时候；直接回复：请输入你的第一条初始提示。\n7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。\n8、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。\n9、如果用户想“查看图片内容”，应优先调用图片读取工具将图片转成 base64 或视觉消息格式，再将其发送给支持多模态的模型。\n10、对于图片类任务，优先使用图片工具而不是尝试直接读取二进制原始内容。""",
-        "en": """You are a CLI-based coding agent named Jason Li, focused on completing development tasks by using files, commands, and Python scripts.\n\nWorking principles:\n1. Inspect the working directory and understand the requirement first.\n2. Prefer using network search tools for real-time information such as weather, news, or other current topics.\n3. All code file creation, editing, and deletion operations are performed in the working directory. If the user does not specify a directory, the project root is used by default.\n4. If needed, provide concise explanations and next-step suggestions.\n5. If the task involves deleting system files or executing dangerous commands, ask for confirmation first.\n6. When the user enters /task-start, reply with: please enter your first initial prompt.\n7. When information is missing, do not speculate; prefer using search tools to fill the gap and keep the answer precise and evidence-based.\n8. If the user wants to read or recognize other binary files, you must clearly state that you cannot directly read or interpret generic binary file contents.\n9. If the user wants to inspect image content, you should first use the image-reading tool to convert the image into base64 or a visual-message format and then send it to a multimodal-capable model.\n10. For image tasks, prefer the image tool over attempting to read the raw binary contents directly.""",
+        "zh": ZH_SYSTEM_PROMPT,
+        "en": EN_SYSTEM_PROMPT,
     },
     "config_field_model": {"zh": "模型名称，例如 qwen2.5-7b-instruct", "en": "Model name, for example qwen2.5-7b-instruct"},
     "config_field_base_url": {"zh": "OpenAI 兼容接口地址，例如 http://127.0.0.1:11434/v1", "en": "OpenAI-compatible base URL, for example http://127.0.0.1:11434/v1"},
@@ -225,11 +248,12 @@ DEFAULT_SYSTEM_PROMPT = t("system_prompt")
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
-DEFAULT_MAX_CHAT_COUNT = 5
-CHAT_MESSAGE_MAX_COUNT = 6
+DEFAULT_MAX_CHAT_COUNT = 7
+CHAT_MESSAGE_MAX_COUNT = 8
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
 RE_ACTION_DELAY = 6 # unit: seconds
-TOOL_SUBPROCESS_TIMEOUT = 60 * 60  # 1 hour in seconds
+TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 1 hour in seconds
+TASK_DESCRIPTION_TARGET = "[This is the task list after understanding the user's needs]"
 DEFAULT_MODEL_CONFIG: dict[str, Any] = {
     "model": "",
     "base_url": "",
@@ -919,6 +943,91 @@ def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "content": traceback.format_exc()}
 
 
+def looks_like_background_service_command(command: Any) -> bool:
+    if isinstance(command, (list, tuple)):
+        text = " ".join(str(part) for part in command)
+    else:
+        text = str(command or "")
+
+    normalized = text.lower().strip()
+    if not normalized:
+        return False
+
+    background_markers = (
+        "npm run dev",
+        "npm start",
+        "pnpm dev",
+        "pnpm start",
+        "yarn dev",
+        "yarn start",
+        "vite",
+        "next dev",
+        "next start",
+        "uvicorn",
+        "flask run",
+        "gunicorn",
+        "python app.py",
+        "python main.py",
+        "python manage.py runserver",
+        "python -m http.server",
+        "http.server",
+        "serve",
+        "watch",
+    )
+
+    if any(marker in normalized for marker in background_markers):
+        return True
+
+    if normalized.startswith(("python ", "py ")) and any(script in normalized for script in ("app.py", "main.py", "manage.py")):
+        return True
+
+    return False
+
+
+def start_background_process(command: Any, cwd: str) -> dict[str, Any]:
+    safe_cwd = resolve_execution_cwd(cwd, Path.cwd())
+    startup_kwargs: dict[str, Any] = {
+        "cwd": safe_cwd,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+
+    if os.name == "nt":
+        startup_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    try:
+        if isinstance(command, (list, tuple)):
+            process = subprocess.Popen(list(command), start_new_session=True, **startup_kwargs)
+        else:
+            process = subprocess.Popen(str(command), shell=True, start_new_session=True, **startup_kwargs)
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        logger.warning(t("tool_subprocess_failed"), cwd, safe_cwd, exc)
+        return {"status": "error", "content": str(exc)}
+
+    return {
+        "status": "ok",
+        "content": f"Started background process (pid={process.pid})",
+        "pid": process.pid,
+        "cwd": safe_cwd,
+    }
+
+
+def wait_for_health_check(url: str, timeout_seconds: int = 20) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if getattr(response, "status", 0) < 500:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout: int | None = None) -> tuple[int, str, str]:
     safe_cwd = resolve_execution_cwd(cwd, Path.cwd())
     try:
@@ -1150,6 +1259,21 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("execute_command missing command argument, raw args: %s", args)
             return result
         cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
+        background = bool(args.get("background", False))
+        if background or looks_like_background_service_command(command):
+            result = start_background_process(command, cwd)
+            if result.get("status") == "ok":
+                health_check_url = args.get("health_check_url")
+                if health_check_url:
+                    ready = wait_for_health_check(str(health_check_url), timeout_seconds=int(args.get("health_check_timeout", 20)))
+                    result["health_check_ready"] = ready
+                    result["content"] = (
+                        f"Started background process (pid={result['pid']})"
+                        + (" and confirmed health check succeeded." if ready else " but health check did not succeed yet.")
+                    )
+            logger.info("execute_command background result: %s", result)
+            return result
+
         returncode, stdout, stderr = run_subprocess_command(command, cwd, shell=True, timeout=TOOL_SUBPROCESS_TIMEOUT)
         response = {
             "status": "ok" if returncode == 0 else "error",
@@ -1426,10 +1550,51 @@ def parse_tool_calls_from_content(content: str | None) -> list[Any]:
     return decoded_calls
 
 
+def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]], user_text: str, debug_enabled: bool = False) -> str:
+    planning_prompt = (
+        "你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。\n\n"
+        "在生成任务执行计划时，请遵循以下工作原则：\n"
+        "1、先检查工作目录并理解需求。\n"
+        "2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。\n"
+        "3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。\n"
+        "4、如果需要，输出简洁的说明与下一步建议。\n"
+        "5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。\n"
+        "6、当用户输入指令：/task-start 的时候，直接回复：请输入你的第一条初始提示。\n"
+        "7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。\n"
+        "8、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。\n"
+        "9、如果用户想“查看图片内容”，应优先调用图片读取工具将图片转成 base64 或视觉消息格式，再将其发送给支持多模态的模型。\n"
+        "10、对于图片类任务，优先使用图片工具而不是尝试直接读取二进制原始内容。\n"
+        "11、基于上下文和历史对话，先梳理用户的完整意图，再生成一份清晰、可执行的步骤清单；随后按步骤逐步完成任务，并在每个步骤完成后反馈执行状态和进度。\n"
+        "12、在任何需要执行命令的步骤中，先判断该命令属于短时命令还是持久命令，并在任务清单中明确写出你的判断说明：短时命令如 ls、pytest、python -m compileall 等应同步执行并等待结果；持久命令如 npm run dev、python app.py、uvicorn、flask run、serve、http.server 等应优先以后台方式启动，并在必要时用健康检查确认服务已就绪。\n\n"
+        "请严格按照以下格式输出结果：\n\n"
+        "用户原始指令：......\n\n"
+        "结合上下文得到用户的完整意图：.....\n\n"
+        "接下来按照这个步骤逐步执行完成任务：\n\n"
+        "1、第一步：......\n"
+        "2、第二步：......\n"
+        "......"
+    )
+    planning_messages = [
+        {"role": "system", "content": planning_prompt},
+        {"role": "user", "content": user_text},
+    ]
+    if history:
+        planning_messages.insert(1, {"role": "user", "content": "以下是历史上下文：\n" + json.dumps(history, ensure_ascii=False)})
+
+    assistant_message = chat_once(client, model, planning_messages, temperature=0.2, debug_enabled=debug_enabled)
+    return (assistant_message.content or "").strip() or user_text
+
+
 def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, user_text: str, debug_enabled: bool = False, recorder: ConversationRecorder | None = None) -> None:
     reset_interruption_state()
     history = session_store.load()
-    first_task_prompt = {"role": "user", "content": user_text}
+    planned_user_text = user_text
+    try:
+        planned_user_text = plan_user_request(client, model, history, user_text, debug_enabled=debug_enabled)
+    except Exception:
+        logger.exception("Planning step failed; continuing with original user input")
+
+    first_task_prompt = {"role": "user", "content": planned_user_text}
     history.append(first_task_prompt)
     session_store.save(history)
     if recorder:
@@ -1503,7 +1668,7 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                 result = execute_tool_call(tc)
                 end_calling_tips = f"tool={tc.function.name}\nresult={json.dumps(result, ensure_ascii=False)}"
                 show_stage(t("tool_call_finished"), end_calling_tips[:80])
-                show_tool_result(tc, result)
+                # show_tool_result(tc, result)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
 
                 if tc.function.name == "read_image_as_base64":
