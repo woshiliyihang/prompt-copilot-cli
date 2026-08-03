@@ -754,6 +754,23 @@ def normalize_mcp_tool_definition(tool_obj: Any) -> dict[str, Any]:
     }
 
 
+def get_tool_description(tool_call: Any) -> str:
+    description = getattr(getattr(tool_call, "function", None), "description", None)
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+
+    tool_name = getattr(getattr(tool_call, "function", None), "name", None)
+    if not isinstance(tool_name, str) or not tool_name:
+        return ""
+
+    for definition in TOOL_DEFINITIONS + ACTIVE_MCP_TOOL_DEFINITIONS:
+        function = definition.get("function") or {}
+        if function.get("name") == tool_name:
+            return str(function.get("description", "")).strip()
+
+    return ""
+
+
 async def _run_mcp_session(server_config: dict[str, Any], handler: Any) -> Any:
     transport = str(server_config.get("transport") or server_config.get("type") or "stdio").lower()
     if transport in {"http", "streamable_http", "streamable-http"}:
@@ -1461,7 +1478,14 @@ def show_stage(title: str, content: str) -> None:
 
 def show_tool_result(tool_call: Any, result: dict[str, Any]) -> None:
     display_result = sanitize_tool_result_for_display(result)
-    console.print(Panel.fit(f"[bold cyan]{tool_call.function.name}[/bold cyan]\n{json.dumps(display_result, ensure_ascii=False, indent=2)}", title=t("tool_result_title")))
+    description = get_tool_description(tool_call)
+    description_text = f"{description}\n\n" if description else ""
+    console.print(
+        Panel.fit(
+            f"[bold cyan]{tool_call.function.name}[/bold cyan]\n{description_text}{json.dumps(display_result, ensure_ascii=False, indent=2)}",
+            title=t("tool_result_title"),
+        )
+    )
 
 
 def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False) -> Any:
@@ -1610,6 +1634,7 @@ def to_tool_call_objects(tool_calls: list[Any]) -> list[Any]:
                 function=SimpleNamespace(
                     name=getattr(function, "name", ""),
                     arguments=getattr(function, "arguments", {}),
+                    description=getattr(function, "description", ""),
                 ),
             )
         )
@@ -1779,15 +1804,16 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
 
         for tc in tool_calls:
             try:
-                start_calling_tips = f"tool={tc.function.name}\narguments={tc.function.arguments}"
+                tool_desc = get_tool_description(tc)
+                start_calling_tips = f"tool={tc.function.name}\ndescription={tool_desc}\narguments={tc.function.arguments}"
                 show_stage(t("starting_tool_call"), start_calling_tips[:80])
                 # if recorder:
                 #     recorder.record_tool_start(tc.function.name, tc.function.arguments)
                 result = execute_tool_call(tc)
-                end_calling_tips = f"tool={tc.function.name}\nresult={json.dumps(result, ensure_ascii=False)}"
-                show_stage(t("tool_call_finished"), end_calling_tips[:80])
-                # show_tool_result(tc, result)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
+                show_tool_result(tc, result)
+                # end_calling_tips = f"tool={tc.function.name}\nresult={json.dumps(result, ensure_ascii=False)}"
+                # show_stage(t("tool_call_finished"), end_calling_tips[:80])
 
                 if tc.function.name == "read_image_as_base64":
                     try:
