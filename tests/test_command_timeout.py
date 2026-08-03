@@ -19,6 +19,19 @@ class CommandTimeoutTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("timed out", stderr.lower())
 
+    def test_start_background_process_returns_running_state(self) -> None:
+        result = main.start_background_process(
+            [sys.executable, "-c", "import time; time.sleep(0.2)"],
+            cwd=".",
+            timeout_seconds=3,
+            output_log_path=str(Path("logs") / "test_background.log"),
+        )
+
+        self.assertEqual(result.get("status"), "ok")
+        self.assertEqual(result.get("state"), "running")
+        self.assertIsNotNone(result.get("pid"))
+        self.assertIn("log_path", result)
+
 
 if __name__ == "__main__":
     unittest.main()

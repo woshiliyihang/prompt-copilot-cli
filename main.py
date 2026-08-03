@@ -273,7 +273,7 @@ TRANSLATIONS = {
     "context_size_label": {"zh": "提交上下文大小", "en": "Submitted context size"},
     "response_length_label": {"zh": "回复内容长度", "en": "Response content length"},
     "recent_conversations_header": {"zh": "# 最近对话记录", "en": "# Recent conversations"},
-    "task_end_system_prompt": {"zh": "你是提示词优化专家（精通将对话记录转化为清晰、可执行的任务提示）。\n输入：首先是用户在输入 /task-start 后会给出第一条初始提示，随后是从该标记以来的对话记录（包括模型回复、工具调用与结果）。\n任务：阅读这些记录，理解用户起始提示与后续的澄清或更改，并结合这些信息生成一个改进后的、清晰且可直接用于执行的最终提示词。\n输出要求：只输出最终改进后的提示词文本，不要添加任何解释、元信息或注释。长度控制在 2000 字符以内。", "en": "You are a prompt-optimization expert skilled at turning conversation history into a clear and actionable task prompt.\nInput: first the user provides an initial prompt after /task-start, then the conversation history from that point onward including model replies, tool calls, and results.\nTask: read these records, understand the initial prompt and any follow-up clarifications or changes, and generate an improved final prompt that is clear, executable, and ready to use.\nOutput requirements: return only the final improved prompt text, with no explanation, metadata, or comments. Keep it within 2000 characters."},
+    "task_end_system_prompt": {"zh": "你是提示词优化专家（精通将对话记录转化为清晰、可执行的任务提示）。\n输入：首先是用户在输入 /task-start 后会给出第一条初始提示，随后是从该标记以来的对话记录（包括模型回复、工具调用与结果）。\n任务：阅读这些记录，理解用户起始提示与后续的澄清或更改，并结合这些信息生成一个改进后的、清晰且可直接用于执行的最终提示词。\n输出要求：只输出最终改进后的提示词文本，不要添加任何解释、元信息或注释。长度控制在 18000 字符以内。", "en": "You are a prompt-optimization expert skilled at turning conversation history into a clear and actionable task prompt.\nInput: first the user provides an initial prompt after /task-start, then the conversation history from that point onward including model replies, tool calls, and results.\nTask: read these records, understand the initial prompt and any follow-up clarifications or changes, and generate an improved final prompt that is clear, executable, and ready to use.\nOutput requirements: return only the final improved prompt text, with no explanation, metadata, or comments. Keep it within 18000 characters."},
     "task_end_user_message": {"zh": "对话记录（从 /task-start 开始，按时间从旧到新）：\n\n{compiled_text}", "en": "Conversation history (starting from /task-start, from oldest to newest):\n\n{compiled_text}"},
     "task_end_generation_failed_log": {"zh": "调用模型生成最终提示失败", "en": "Failed to generate the final prompt with the model"},
     "final_prompt_header": {"zh": "# 最终提示词", "en": "# Final prompt"},
@@ -1051,6 +1051,19 @@ def looks_like_background_service_command(command: Any) -> bool:
     return False
 
 
+def _read_text_file_tail(path: str | os.PathLike[str], max_chars: int = 4000) -> str:
+    try:
+        p = Path(path)
+        if not p.exists():
+            return ""
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if len(text) > max_chars:
+            return text[-max_chars:]
+        return text
+    except Exception:
+        return ""
+
+
 def stream_background_process_output(process: subprocess.Popen[Any], log_path: str | os.PathLike[str]) -> None:
     log_file = Path(log_path)
 
@@ -1094,14 +1107,14 @@ def start_background_process(command: Any, cwd: str, timeout_seconds: int | None
     log_path = Path(output_log_path).expanduser() if output_log_path else ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    log_handle = log_path.open("a", encoding="utf-8")
     startup_kwargs: dict[str, Any] = {
         "cwd": safe_cwd,
-        "stdout": log_handle,
+        "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "text": True,
         "encoding": "utf-8",
         "errors": "replace",
+        "bufsize": 1,
     }
 
     if os.name == "nt":
@@ -1114,17 +1127,22 @@ def start_background_process(command: Any, cwd: str, timeout_seconds: int | None
             process = subprocess.Popen(str(command), shell=True, start_new_session=True, **startup_kwargs)
     except (FileNotFoundError, NotADirectoryError, OSError) as exc:
         logger.warning(t("tool_subprocess_failed"), cwd, safe_cwd, exc)
-        try:
-            log_handle.close()
-        except Exception:
-            pass
         return {"status": "error", "content": str(exc)}
 
-    try:
-        log_handle.flush()
-        log_handle.close()
-    except Exception:
-        pass
+    def _drain_output() -> None:
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                while True:
+                    chunk = process.stdout.readline() if process.stdout is not None else ""
+                    if chunk == "":
+                        break
+                    handle.write(chunk)
+                    handle.flush()
+        except Exception:
+            pass
+
+    output_thread = threading.Thread(target=_drain_output, daemon=True)
+    output_thread.start()
 
     if timeout_seconds is not None and timeout_seconds > 0:
         def _watch_timeout() -> None:
@@ -1139,6 +1157,7 @@ def start_background_process(command: Any, cwd: str, timeout_seconds: int | None
                         process.wait(timeout=5)
                     with log_path.open("a", encoding="utf-8") as handle:
                         handle.write(f"\n[timeout] process terminated after {timeout_seconds}s\n")
+                        handle.flush()
             except Exception:
                 pass
 
@@ -1153,7 +1172,28 @@ def start_background_process(command: Any, cwd: str, timeout_seconds: int | None
         "pid": process.pid,
         "cwd": safe_cwd,
         "log_path": str(log_path),
+        "state": "running",
     }
+
+
+def get_background_process_status(process_id: int, log_path: str | os.PathLike[str] | None = None, timeout_seconds: int | None = None) -> dict[str, Any]:
+    try:
+        process = subprocess.Popen(["ps", "-p", str(process_id), "-o", "pid="], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, _ = process.communicate(timeout=5)
+        running = bool(stdout and str(stdout).strip())
+    except Exception:
+        running = False
+
+    output_text = _read_text_file_tail(log_path) if log_path else ""
+    payload = {
+        "status": "running" if running else "completed",
+        "pid": process_id,
+        "log_path": str(log_path) if log_path else None,
+        "output_tail": output_text,
+    }
+    if timeout_seconds is not None and timeout_seconds > 0 and not running:
+        payload["timeout_seconds"] = timeout_seconds
+    return payload
 
 
 def wait_for_health_check(url: str, timeout_seconds: int = 20) -> bool:
@@ -1447,6 +1487,7 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
                 except Exception:
                     result["health_check_ready"] = False
                     result["content"] = f"Started background process (pid={result['pid']})"
+            result["output_tail"] = _read_text_file_tail(output_log_path, max_chars=4000)
             logger.info("execute_command background result: %s", result)
             return result
 
