@@ -289,7 +289,7 @@ def t(key: str, **kwargs: Any) -> str:
 
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.2.1"
+APPLICATION_VERSION = "0.2.2"
 DEFAULT_SYSTEM_PROMPT = t("system_prompt")
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
@@ -297,7 +297,7 @@ LOG_FILE = LOG_DIR / "agent_runtime.log"
 DEFAULT_MAX_CHAT_COUNT = 7
 CHAT_MESSAGE_MAX_COUNT = 8
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
-RE_ACTION_DELAY = 6 # unit: seconds
+RE_ACTION_DELAY = 1 # unit: seconds
 TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 1 hour in seconds
 MODEL_REQUEST_TIMEOUT_SECONDS = 600  # generous timeout for slower model generations
 TASK_DESCRIPTION_TARGET = "[This is the task list after understanding the user's needs]"
