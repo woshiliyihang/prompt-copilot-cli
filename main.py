@@ -94,6 +94,8 @@ def build_bottom_toolbar_text() -> str:
     return f"{token_summary} | {base}"
 
 
+
+
 ZH_SYSTEM_PROMPT = """
 你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。
 
@@ -109,7 +111,7 @@ ZH_SYSTEM_PROMPT = """
 9、如果用户想“查看图片内容”，应优先调用图片读取工具将图片转成 base64 或视觉消息格式，再将其发送给支持多模态的模型。
 10、对于图片类任务，优先使用图片工具而不是尝试直接读取二进制原始内容。
 11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时每个步骤执行完毕要反馈状态和进度。
-12、在执行命令前，先判断该命令是短时命令还是持久命令：短时命令如 ls、pytest、python -m compileall 等应同步执行并等待结果；持久命令如 npm run dev、python app.py、uvicorn、flask run、serve、http.server 等会持续运行，应该优先以后台方式启动，并在必要时用健康检查确认服务已就绪。
+12、在使用 execute_command 工具前必须先判断命令类型：若是 ls、pytest、build 等短时一次性命令，需设置 background=false 同步等待并依据返回的 exit_code 决策且严禁盲目重试，耗时长者需增加 timeout_seconds；若是 npm run dev、flask run 等持久常驻服务命令，则必须设置 background=true 以免因无法退出被超时强杀，且若有HTTP端口需同时提供 health_check_url 以便轮询确认服务真正就绪。
 13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
 
 """
@@ -129,36 +131,43 @@ Working principles:
 9. If the user wants to inspect image content, you should first use the image-reading tool to convert the image into base64 or a visual-message format and then send it to a multimodal-capable model.
 10. For image-related tasks, prefer the image tool rather than trying to read the raw binary contents directly.
 11. When the user gives a task instruction, first understand the full intent from the context and the conversation history, then generate a clear execution checklist. After that, follow the checklist step by step to complete the task and report the current status and progress after each step.
-12. Before executing a command, first determine whether it is a short-lived command or a persistent one: short-lived commands such as ls, pytest, and python -m compileall should be executed synchronously and awaited; persistent commands such as npm run dev, python app.py, uvicorn, flask run, serve, and http.server will keep running, so they should be started in the background and, when needed, checked for readiness with a health check.
+12. Before using the execute_command tool, determine the command type: for short-lived commands like ls, pytest, and build, set background=false to wait synchronously and make decisions based on the returned exit_code, avoiding blind retries; for persistent commands like npm run dev and flask run, set background=true to prevent being killed by timeouts due to inability to exit, and provide a health_check_url for polling to confirm the service is truly ready.
 13、When official network retrieval tools are unavailable and network content is crawled via scripts, differentiated processing shall be performed according to data types: for regular webpage texts, remove redundant contents including HTML tags, style codes, advertising fragments, invalid comments and redundant blank lines, retain only valid main texts and truncate the content if it exceeds 8000 characters with a strict upper limit of 8000 characters for text output; for program source codes, no filtering or cleaning is required, keep the original codes, built-in comments, indentations, line breaks and original formats completely with no character limit on code output.
 
 """
 
 
-PLANNING_PROMPT = (
-    "你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。\n\n"
-    "在生成任务执行计划时，请遵循以下工作原则：\n"
-    "1、先检查工作目录并理解需求。\n"
-    "2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。\n"
-    "3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。\n"
-    "4、如果需要，输出简洁的说明与下一步建议。\n"
-    "5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。\n"
-    "6、当用户输入指令：/task-start 的时候，直接回复：请输入你的第一条初始提示。\n"
-    "7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。\n"
-    "8、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。\n"
-    "9、如果用户想“查看图片内容”，应优先调用图片读取工具将图片转成 base64 或视觉消息格式，再将其发送给支持多模态的模型。\n"
-    "10、对于图片类任务，优先使用图片工具而不是尝试直接读取二进制原始内容。\n"
-    "11、基于上下文和历史对话，先梳理用户的完整意图，再生成一份清晰、可执行的步骤清单；随后按步骤逐步完成任务，并在每个步骤完成后反馈执行状态和进度。\n"
-    "12、在任何需要执行命令的步骤中，先判断该命令属于短时命令还是持久命令，并在任务清单中明确写出你的判断说明：短时命令如 ls、pytest、python -m compileall 等应同步执行并等待结果；持久命令如 npm run dev、python app.py、uvicorn、flask run、serve、http.server 等应优先以后台方式启动，并在必要时用健康检查确认服务已就绪。\n\n"
-    "13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。\n\n"
-    "请严格按照以下格式输出结果：\n\n"
-    "用户原始指令：......\n\n"
-    "结合上下文得到用户的完整意图：.....\n\n"
-    "接下来按照这个步骤逐步执行完成任务：\n\n"
-    "1、第一步：......\n"
-    "2、第二步：......\n"
-    "......"
-)
+PLANNING_PROMPT = """
+你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。
+
+在生成任务执行计划时，请遵循以下工作原则：
+
+1、先检查工作目录并理解需求。
+2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。
+3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。
+4、如果需要，输出简洁的说明与下一步建议。
+5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。
+6、当用户输入指令：/task-start 的时候,直接回复：请输入你的第一条初始提示。
+7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。
+8、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
+9、如果用户想“查看图片内容”，应优先调用图片读取工具将图片转成 base64 或视觉消息格式，再将其发送给支持多模态的模型。
+10、对于图片类任务，优先使用图片工具而不是尝试直接读取二进制原始内容。
+11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时每个步骤执行完毕要反馈状态和进度。
+12、在使用 execute_command 工具前必须先判断命令类型：若是 ls、pytest、build 等短时一次性命令，需设置 background=false 同步等待并依据返回的 exit_code 决策且严禁盲目重试，耗时长者需增加 timeout_seconds；若是 npm run dev、flask run 等持久常驻服务命令，则必须设置 background=true 以免因无法退出被超时强杀，且若有HTTP端口需同时提供 health_check_url 以便轮询确认服务真正就绪。
+13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
+
+请严格按照以下格式输出结果：
+
+用户原始指令：......
+
+结合上下文得到用户的完整意图：.....
+
+接下来按照这个步骤逐步执行完成任务：
+1、第一步：......
+2、第二步：......
+......
+
+"""
 
 
 TRANSLATIONS = {
@@ -479,18 +488,38 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": t("execute_command_desc"),
+            "description": "Executes a shell command. Set 'background' to false for short-lived commands (e.g., 'ls', 'pytest', 'npm run build') to synchronously wait for the exact exit code. Set 'background' to true for persistent services (e.g., 'npm run dev', 'python app.py') to start them in the background, returning immediately with a PID and initial logs.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": t("command_desc")},
-                    "cwd": {"type": "string", "description": t("cwd_desc")},
-                    "timeout_seconds": {"type": "integer", "description": "Maximum runtime in seconds before the background process is terminated automatically."},
-                    "output_log_path": {"type": "string", "description": "Optional path to a log file where stdout/stderr will be written."},
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Set to true for long-running, non-terminating processes (like dev servers). Set to false (or omit) for short commands that execute and exit."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory to execute the command in."
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Timeout in seconds for foreground (synchronous) commands. Ignored if background=true. Defaults to 120."
+                    },
+                    "health_check_url": {
+                        "type": "string",
+                        "description": "URL to poll for readiness. Only used if background=true. The tool will block until this URL returns a success status code or times out."
+                    },
+                    "output_log_path": {
+                        "type": "string",
+                        "description": "Optional path to a log file where stdout/stderr will be written. Only used if background=true."
+                    }
                 },
-                "required": ["command", "cwd"],
-            },
-        },
+                "required": ["command"]
+            }
+        }
     },
     {
         "type": "function",
@@ -1256,6 +1285,138 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
     return proc.returncode, stdout or "", stderr or ""
 
 
+import os
+import signal
+import subprocess
+import uuid
+import time
+import platform
+from pathlib import Path
+
+def handle_execute_command(args):
+    command = args.get("command")
+    if not command:
+        return {"status": "error", "content": "Missing 'command' argument."}
+    
+    cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
+    
+    # 解析命令类型参数
+    is_background = args.get("background", False)
+    
+    # ================= 路径 A: 常驻服务 (保留你原有的优秀逻辑) =================
+    if is_background:
+        output_log_path = args.get("output_log_path") or args.get("log_path")
+        if not output_log_path:
+            output_log_path = ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+            
+        result = start_background_process(command, cwd, timeout_seconds=None, output_log_path=output_log_path)
+        
+        if result.get("status") == "ok":
+            health_check_url = args.get("health_check_url")
+            if health_check_url:
+                try:
+                    ready = wait_for_health_check(str(health_check_url), timeout_seconds=int(args.get("health_check_timeout", 20)))
+                    result["health_check_ready"] = ready
+                    result["content"] = f"Started background process (pid={result['pid']})" + (" and health check succeeded." if ready else " but health check did not succeed yet.")
+                except Exception:
+                    result["health_check_ready"] = False
+                    result["content"] = f"Started background process (pid={result['pid']})"
+            
+            time.sleep(0.5) # 防止竞态
+            result["output_tail"] = _read_text_file_tail(output_log_path, max_chars=4000)
+            return result
+        return result
+        
+    # ================= 路径 B: 一次性命令 (新增 Sentinel 同步等待逻辑) =================
+    else:
+        timeout_seconds = int(args.get("timeout_seconds") or args.get("timeout") or 120)
+        
+        # 生成唯一哨兵并组装命令 (跨平台适配错误码输出)
+        sentinel = f"@@CMD_DONE_{uuid.uuid4().hex}@@"
+        if platform.system() == "Windows":
+            full_cmd = f"{command}\necho {sentinel} %errorlevel%\n"
+        else:
+            full_cmd = f"{command}\necho {sentinel} $?\n"
+        
+        # 构建启动参数 (跨平台适配进程组)
+        popen_kwargs = {
+            "shell": True,
+            "cwd": str(cwd),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "bufsize": 1,
+        }
+        
+        if platform.system() == "Windows":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+            
+        process = subprocess.Popen(full_cmd, **popen_kwargs)
+        
+        output_lines = []
+        timed_out = False
+        start_time = time.time()
+        
+        try:
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    if time.time() - start_time > timeout_seconds:
+                        timed_out = True
+                        break
+                    continue
+                
+                if sentinel in line:
+                    # 提取退出码
+                    try:
+                        exit_code = int(line.split(sentinel)[-1].strip().rstrip())
+                    except:
+                        exit_code = -1
+                    break
+                else:
+                    output_lines.append(line)
+                    if len(output_lines) > 5000:
+                        output_lines.pop(0)
+                        
+                if time.time() - start_time > timeout_seconds:
+                    timed_out = True
+                    break
+        finally:
+            # 超时或完成后，杀掉整个进程树 (跨平台适配)
+            if process.poll() is None:
+                try:
+                    if platform.system() == "Windows":
+                        # Windows: taskkill 强杀整个进程树
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], 
+                                      capture_output=True, timeout=5)
+                    else:
+                        # Unix: 杀整个进程组
+                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                        time.sleep(1)
+                        if process.poll() is None:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+        
+        content = "".join(output_lines)[-4000:]
+        
+        if timed_out:
+            return {
+                "status": "timeout",
+                "exit_code": None,
+                "content": f"{content}\n[ERROR] Command timed out after {timeout_seconds} seconds and was forcefully terminated.\n[Hint] If this is a dev server, please use background=true."
+            }
+        else:
+            return {
+                "status": "success" if exit_code == 0 else "error",
+                "exit_code": exit_code,
+                "content": content
+            }
+
+
+
 def execute_tool_call(tool_call: Any) -> dict[str, Any]:
     name = getattr(tool_call.function, "name", "")
     args = safe_parse_tool_args(getattr(tool_call.function, "arguments", {}))
@@ -1455,44 +1616,7 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
         return result
 
     if name == "execute_command":
-        command = args.get("command")
-        if not command:
-            result = {"status": "error", "content": t("tool_missing_arg", name="execute_command", arg="command")}
-            logger.error("execute_command missing command argument, raw args: %s", args)
-            return result
-        cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
-
-        timeout_seconds = None
-        timeout_value = args.get("timeout_seconds") or args.get("timeout")
-        if timeout_value is not None:
-            try:
-                timeout_seconds = int(timeout_value)
-            except (TypeError, ValueError):
-                timeout_seconds = None
-
-        output_log_path = args.get("output_log_path") or args.get("log_path")
-        if not output_log_path:
-            output_log_path = ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
-        result = start_background_process(command, cwd, timeout_seconds=timeout_seconds, output_log_path=output_log_path)
-        if result.get("status") == "ok":
-            health_check_url = args.get("health_check_url")
-            if health_check_url:
-                try:
-                    ready = wait_for_health_check(str(health_check_url), timeout_seconds=int(args.get("health_check_timeout", 20)))
-                    result["health_check_ready"] = ready
-                    result["content"] = (
-                        f"Started background process (pid={result['pid']})"
-                        + (" and confirmed health check succeeded." if ready else " but health check did not succeed yet.")
-                    )
-                except Exception:
-                    result["health_check_ready"] = False
-                    result["content"] = f"Started background process (pid={result['pid']})"
-            result["output_tail"] = _read_text_file_tail(output_log_path, max_chars=4000)
-            logger.info("execute_command background result: %s", result)
-            return result
-
-        logger.info("execute_command result: %s", result)
-        return result
+        return handle_execute_command(args)
 
     if name == "execute_python_script":
         script = args.get("script")
