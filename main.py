@@ -114,6 +114,7 @@ ZH_SYSTEM_PROMPT = """
 12、使用 execute_python_script 时必须在脚本内自行管理进程生命周期：若是 ls、pytest、build 等短命令用 subprocess.run 显式设置 timeout，若是 npm run dev、flask run 等常驻服务用 subprocess.Popen 脱离终端启动并在脚本内轮询健康检查 URL，确认就绪后打印 PID 并立即 sys.exit() 退出以防触发 360 秒强制超时。
 13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
 14、脱离终端启动常驻服务时务必兼顾跨平台兼容：Linux/Mac 环境设置 start_new_session=True，Windows 环境设置 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP。
+15、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），严禁在脚本内同步阻塞，必须用 subprocess.Popen 跨平台脱离终端启动并将进度心跳写入本地日志文件，打印 PID 后立即 sys.exit()，工具 timeout_seconds 设为 15 秒仅验证启动；后续须通过检查日志监控进度，若发现任务完成或长时间无心跳更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
 
 """
 
@@ -135,6 +136,7 @@ Working principles:
 12. When using the execute_python_script tool, manage the process lifecycle within the script: for short commands like ls, pytest, and build, use subprocess.run with an explicit timeout; for persistent commands like npm run dev and flask run, use subprocess.Popen to start them in the background and poll a health check URL to confirm they are ready before printing the PID and exiting immediately to avoid triggering the 360-second timeout.
 13、When official network retrieval tools are unavailable and network content is crawled via scripts, differentiated processing shall be performed according to data types: for regular webpage texts, remove redundant contents including HTML tags, style codes, advertising fragments, invalid comments and redundant blank lines, retain only valid main texts and truncate the content if it exceeds 8000 characters with a strict upper limit of 8000 characters for text output; for program source codes, no filtering or cleaning is required, keep the original codes, built-in comments, indentations, line breaks and original formats completely with no character limit on code output.
 14、When starting a persistent service in the background, ensure cross-platform compatibility: set start_new_session=True for Linux/Mac environments and creationflags=subprocess.CREATE_NEW_PROCESS_GROUP for Windows environments.
+15、For long-running tasks with unpredictable durations (such as large file downloads, model training, full tests, complex builds, etc.), synchronous blocking execution within the script is strictly prohibited. Instead, use subprocess.Popen to start the task in the background across platforms and write progress heartbeats to a local log file. After printing the PID, immediately call sys.exit() and set the tool's timeout_seconds to 15 seconds for startup verification only. Subsequently, monitor progress by checking the log file. If the task completes or there is no heartbeat update for an extended period, proactively call system commands (like kill -9 PID) to clean up background processes and prevent orphan processes from consuming resources. Only when the task itself supports timeout parameters or has a predictable duration can synchronous execution be performed within the script with a reasonable timeout_seconds setting.
 
 """
 
@@ -158,6 +160,8 @@ PLANNING_PROMPT = """
 12、使用 execute_python_script 时必须在脚本内自行管理进程生命周期：若是 ls、pytest、build 等短命令用 subprocess.run 显式设置 timeout，若是 npm run dev、flask run 等常驻服务用 subprocess.Popen 脱离终端启动并在脚本内轮询健康检查 URL，确认就绪后打印 PID 并立即 sys.exit() 退出以防触发 360 秒强制超时。
 13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
 14、脱离终端启动常驻服务时务必兼顾跨平台兼容：Linux/Mac 环境设置 start_new_session=True，Windows 环境设置 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP。
+15、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），严禁在脚本内同步阻塞，必须用 subprocess.Popen 跨平台脱离终端启动并将进度心跳写入本地日志文件，打印 PID 后立即 sys.exit()，工具 timeout_seconds 设为 15 秒仅验证启动；后续须通过检查日志监控进度，若发现任务完成或长时间无心跳更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
+
 
 请严格按照以下格式输出结果：
 
