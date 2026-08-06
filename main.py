@@ -322,7 +322,7 @@ def t(key: str, **kwargs: Any) -> str:
 
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.2.3"
+APPLICATION_VERSION = "0.2.6"
 DEFAULT_SYSTEM_PROMPT = t("system_prompt")
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
