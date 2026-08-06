@@ -1,6 +1,7 @@
 import contextlib
 import io
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -101,6 +102,42 @@ class CLITests(unittest.TestCase):
         self.assertEqual(planned, "用户原始指令：帮我修复这个 bug\n\n结合上下文得到用户的完整意图：修复当前仓库中的 bug。\n\n接下来按照这个步骤逐步执行完成任务：\n1、第一步：定位问题\n2、第二步：实现修复")
         self.assertEqual(captured["messages"][0]["role"], "system")
         self.assertEqual(captured["messages"][-1]["content"], "帮我修复这个 bug")
+
+    def test_task_end_command_uses_aligned_working_principles(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_chat_once(client, model, messages, temperature, debug_enabled=False):
+            captured["messages"] = messages
+            return types.SimpleNamespace(content="final prompt")
+
+        original_chat_once = main.chat_once
+        original_lang = main.UI_SYSTEM_LANGUAGE
+        main.UI_SYSTEM_LANGUAGE = "zh"
+        main.chat_once = fake_chat_once
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                md_path = Path(temp_dir) / "recent_conversations.md"
+                md_path.write_text(
+                    "# Recent conversations\n\n## Round 1\n\n**User:** /task-start\n\nhello\n\n**Assistant:** hi",
+                    encoding="utf-8",
+                )
+                main.handle_task_end_command(
+                    md_path=md_path,
+                    client=object(),
+                    model="gpt-4o-mini",
+                    system_prompt="ignored",
+                    workdir=Path(temp_dir),
+                    debug_enabled=False,
+                )
+        finally:
+            main.UI_SYSTEM_LANGUAGE = original_lang
+            main.chat_once = original_chat_once
+
+        self.assertIn("messages", captured)
+        system_prompt = captured["messages"][0]["content"]
+        self.assertIn("先检查工作目录并理解需求", system_prompt)
+        self.assertIn("生成最终提示词时，请严格遵循以下约束", system_prompt)
+        self.assertIn("\n\n", system_prompt)
 
     def test_version_flag_prints_application_version_and_exits(self) -> None:
         parser = main.build_cli_parser()
