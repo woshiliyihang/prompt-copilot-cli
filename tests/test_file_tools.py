@@ -87,6 +87,34 @@ class FileToolTests(unittest.TestCase):
             self.assertTrue(dest.exists())
             self.assertEqual(dest.read_text(encoding="utf-8"), "hello")
 
+    def test_search_code_tool_finds_pattern_in_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "demo.py"
+            target.write_text("def greet():\n    return 'hello'\n", encoding="utf-8")
+
+            result = main.execute_tool_call(DummyToolCall("search_code", {"path": str(root), "pattern": "return 'hello'"}))
+
+            self.assertEqual(result["status"], "ok")
+            matches = json.loads(result["content"])
+            self.assertTrue(matches)
+            self.assertEqual(matches[0]["path"], str(target))
+
+    def test_edit_file_tool_replaces_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "demo.py"
+            target.write_text("print('before')\n", encoding="utf-8")
+
+            result = main.execute_tool_call(
+                DummyToolCall(
+                    "edit_file",
+                    {"path": str(target), "old_string": "before", "new_string": "after"},
+                )
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(target.read_text(encoding="utf-8"), "print('after')\n")
+
 
 if __name__ == "__main__":
     unittest.main()

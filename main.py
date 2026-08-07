@@ -219,6 +219,8 @@ TRANSLATIONS = {
     "copy_file_desc": {"zh": "复制文件。", "en": "Copy a file."},
     "read_image_as_base64_desc": {"zh": "读取图片文件并将其编码为 base64。", "en": "Read an image file and encode it as base64."},
     "list_dir_desc": {"zh": "列出目录中的文件和子目录。", "en": "List files and subdirectories in the given directory."},
+    "search_code_desc": {"zh": "在目录中按文本模式搜索匹配内容。", "en": "Search for matching text within a directory."},
+    "edit_file_desc": {"zh": "在文件中替换指定文本。", "en": "Replace a specific string in a file."},
     "execute_command_desc": {"zh": "在指定目录下执行 shell 命令。", "en": "Execute a shell command in the specified directory."},
     "execute_python_script_desc": {"zh": "执行一个 Python 脚本或一段 Python 代码。", "en": "Execute a Python script or a block of Python code."},
     "path_desc": {"zh": "要读取的文件路径。", "en": "Path of the file to read."},
@@ -509,6 +511,39 @@ TOOL_DEFINITIONS = [
                     "recursive": {"type": "boolean", "description": t("list_dir_recursive_desc")}
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": t("search_code_desc"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": t("list_dir_path_desc")},
+                    "pattern": {"type": "string", "description": "Text pattern to search for."},
+                    "recursive": {"type": "boolean", "description": t("list_dir_recursive_desc")},
+                    "max_results": {"type": "integer", "description": "Maximum number of matches to return."}
+                },
+                "required": ["path", "pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": t("edit_file_desc"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": t("write_path_desc")},
+                    "old_string": {"type": "string", "description": "The text to replace."},
+                    "new_string": {"type": "string", "description": "The replacement text."}
+                },
+                "required": ["path", "old_string", "new_string"],
             },
         },
     },
@@ -1626,6 +1661,94 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
         logger.info("list_dir result: %s", result)
         return result
 
+    if name == "search_code":
+        file_path = args.get("path") or args.get("file_path")
+        pattern = args.get("pattern")
+        if not file_path or not pattern:
+            result = {"status": "error", "content": t("tool_missing_arg", name="search_code", arg="path/pattern")}
+            logger.error("search_code missing arguments, raw args: %s", args)
+            return result
+
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            result = {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
+            logger.info("search_code result: %s", result)
+            return result
+
+        recursive = bool(args.get("recursive", True))
+        max_results = args.get("max_results")
+        try:
+            max_results = int(max_results) if max_results is not None else 50
+        except (TypeError, ValueError):
+            max_results = 50
+
+        matches: list[dict[str, Any]] = []
+        if path.is_file():
+            candidates = [path]
+        elif recursive:
+            candidates = [item for item in sorted(path.rglob("*")) if item.is_file()]
+        else:
+            candidates = [item for item in sorted(path.iterdir()) if item.is_file()]
+
+        for candidate in candidates:
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for line_number, line in enumerate(content.splitlines(), start=1):
+                if pattern in line:
+                    matches.append({
+                        "path": str(candidate.resolve()),
+                        "line": line_number,
+                        "content": line,
+                    })
+                    if len(matches) >= max_results:
+                        break
+            if len(matches) >= max_results:
+                break
+
+        result = {"status": "ok", "content": json.dumps(matches, ensure_ascii=False)}
+        logger.info("search_code result: %s", result)
+        return result
+
+    if name == "edit_file":
+        file_path = args.get("path") or args.get("file_path")
+        old_string = args.get("old_string")
+        new_string = args.get("new_string")
+        if not file_path or old_string is None or new_string is None:
+            result = {"status": "error", "content": t("tool_missing_arg", name="edit_file", arg="path/old_string/new_string")}
+            logger.error("edit_file missing arguments, raw args: %s", args)
+            return result
+
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            result = {"status": "error", "content": f"File does not exist: {path}"}
+            logger.info("edit_file result: %s", result)
+            return result
+
+        try:
+            original_text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            result = {"status": "error", "content": f"Failed to read file: {path}\n{exc}"}
+            logger.exception("edit_file failed: %s", path)
+            logger.info("edit_file result: %s", result)
+            return result
+
+        if old_string not in original_text:
+            result = {"status": "error", "content": f"Target text not found in file: {path}"}
+            logger.info("edit_file result: %s", result)
+            return result
+
+        updated_text = original_text.replace(old_string, new_string, 1)
+        path.write_text(updated_text, encoding="utf-8")
+        result = {"status": "ok", "content": f"Updated: {path}"}
+        logger.info("edit_file result: %s", result)
+        return result
+
     if name == "execute_python_script":
         script = args.get("script")
         if not script:
@@ -1919,14 +2042,34 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
     if is_special_command(user_text):
         return user_text
 
-    planning_prompt = PLANNING_PROMPT
+    planning_prompt = f"""
+你是一个编程行业需求分析专家，你能够通过历史上下文和用户的输入分析出用户的真实意图，能够拆分步骤，并且能够生成任务执行清单。
+
+### 历史上下文:
+{json.dumps(history, ensure_ascii=False)}
+
+### 用户输入:
+{user_text}
+
+### 请严格按照以下格式输出任务清单：
+
+用户原始指令：......
+
+结合上下文得到用户的完整意图：.....
+
+接下来按照这个步骤逐步执行完成任务：
+1、第一步：......
+2、第二步：......
+......
+
+"""
 
     planning_messages = [
         {"role": "system", "content": planning_prompt},
-        {"role": "user", "content": user_text},
+        {"role": "user", "content": "请分析用户的输入并生成任务清单。"},
     ]
-    if history:
-        planning_messages.insert(1, {"role": "user", "content": "以下是历史上下文：\n" + json.dumps(history, ensure_ascii=False)})
+    # if history:
+    #     planning_messages.insert(1, {"role": "user", "content": "以下是历史上下文：\n" + json.dumps(history, ensure_ascii=False)})
 
     assistant_message = chat_once(client, model, planning_messages, temperature=0.2, debug_enabled=debug_enabled)
     return (assistant_message.content or "").strip() or user_text
@@ -2057,6 +2200,68 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                 # if recorder:
                 #     recorder.record_error(traceback.format_exc())
 
+import json
+from typing import List, Union
+
+def get_content_from_tool_calls(tool_calls: List) -> str:
+    """
+    Extract the `content` field from a list of tool call objects
+    (as returned by OpenAI's ChatCompletionMessage.tool_calls).
+
+    Args:
+        tool_calls: List[ChatCompletionMessageFunctionToolCall] or similar.
+                   Each item should have a `function.arguments` attribute
+                   which is a JSON string containing a dict with a `content` key.
+
+    Returns:
+        The extracted `content` string if found, otherwise an empty string ("").
+    """
+    if not tool_calls:
+        return ""
+
+    for tool_call in tool_calls:
+        try:
+            # 兼容 dict 形式（比如有些 mock / 测试数据）
+            if isinstance(tool_call, dict):
+                func = tool_call.get("function")
+                if not func:
+                    continue
+                # func 可能是 dict，也可能是有 arguments 属性的对象
+                if isinstance(func, dict):
+                    arguments_str = func.get("arguments")
+                else:
+                    arguments_str = getattr(func, "arguments", None)
+            else:
+                # OpenAI SDK 对象：ChatCompletionMessageFunctionToolCall
+                func = getattr(tool_call, "function", None)
+                if func is None:
+                    continue
+                # Function.arguments 是一个 JSON 字符串
+                arguments_str = getattr(func, "arguments", None)
+
+            if not arguments_str:
+                continue
+
+            # arguments 本身就是 JSON 字符串，需要 parse
+            if isinstance(arguments_str, str):
+                arguments = json.loads(arguments_str)
+            elif isinstance(arguments_str, dict):
+                arguments = arguments_str
+            else:
+                # 其他类型直接放弃
+                continue
+
+            # 真正取 content 字段
+            if isinstance(arguments, dict) and "content" in arguments:
+                return arguments["content"]
+
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            # 解析失败或结构异常，忽略这条 tool_call
+            continue
+
+    return ""
+
+
 
 def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_prompt: str, workdir: Path, debug_enabled: bool = False) -> None:
     """Process recent_conversations.md to find the most recent /task-start and use the
@@ -2105,20 +2310,32 @@ def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_pr
     compiled_text = "\n\n".join(["## Round " + r for r in selected])
 
     # Build messages for the model
-    sys_prompt = t("task_end_system_prompt")
+    sys_prompt = f"""
+你是提示词优化专家，负责将对话记录整理为更清晰、可执行的最终任务提示词。
 
-    user_msg = (
-        t("task_end_user_message", compiled_text=compiled_text)
-    )
+### 对话记录
+{compiled_text}
+
+### 生成最终提示词时，请严格遵循以下约束：
+1. 只输出最终改进后的提示词文本，不要添加任何解释、元信息或注释。
+2. 保留用户原始目标、关键上下文、澄清或变更后的要求、待执行步骤与预期产物。
+3. 语言必须清晰、可执行、步骤化，适合直接给后续执行器使用。
+4. 如果上下文中存在不确定信息，应显式写成“待确认”或“需验证”的约束项。
+5. 输出长度控制在 18000 字符以内。
+
+"""
 
     try:
-        assistant_message = chat_once(client, model, [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}], temperature=0.2, debug_enabled=debug_enabled)
+        assistant_message = chat_once(client, model, [{"role": "system", "content": sys_prompt}, {"role": "user", "content": "帮我生成最终提示词,把最终提示词内容输出给我。"}], temperature=0.2, debug_enabled=debug_enabled)
     except Exception:
         logger.exception(t("task_end_generation_failed_log"))
         console.print(Panel.fit(traceback.format_exc(), title=t("task_end_generate_failed")))
         return
-
+    prompt_call_tools = get_content_from_tool_calls(assistant_message.tool_calls)
+    # console.print(f"{prompt_call_tools}")
     final_prompt = (assistant_message.content or "").strip()
+    if not final_prompt:
+        final_prompt = prompt_call_tools
     if not final_prompt:
         console.print(Panel.fit(t("task_end_no_prompt"), title=t("task_end_result")))
         return
