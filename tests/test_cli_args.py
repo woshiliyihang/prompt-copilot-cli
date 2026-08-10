@@ -56,6 +56,16 @@ class CLITests(unittest.TestCase):
         self.assertIn("短时命令", joined)
         self.assertIn("持久命令", joined)
 
+    def test_system_prompt_includes_notebook_memory_guidance(self) -> None:
+        self.assertIn(
+            "记事本方式",
+            main.DEFAULT_SYSTEM_WORKING_PRINCIPLES_ZH,
+        )
+        self.assertIn(
+            "notebook-style",
+            main.DEFAULT_SYSTEM_WORKING_PRINCIPLES_EN,
+        )
+
     def test_special_commands_skip_planning(self) -> None:
         called = {"value": False}
 
