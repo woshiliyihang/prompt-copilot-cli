@@ -1842,10 +1842,12 @@ def show_tool_result(tool_call: Any, result: dict[str, Any]) -> None:
     )
 
 
-def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False) -> Any:
+def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False, disable_tools:bool = False) -> Any:
     ensure_not_interrupted()
     wait_for_model_call_interval()
     tool_definitions = TOOL_DEFINITIONS + ACTIVE_MCP_TOOL_DEFINITIONS
+    if disable_tools:
+        tool_definitions = []
     request_payload = {
         "model": model,
         "messages": messages,
@@ -2045,12 +2047,6 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
     planning_prompt = f"""
 你是一个编程行业需求分析专家，你能够通过历史上下文和用户的输入分析出用户的真实意图，能够拆分步骤，并且能够生成任务执行清单。
 
-### 历史上下文:
-{json.dumps(history, ensure_ascii=False)}
-
-### 用户输入:
-{user_text}
-
 ### 请严格按照以下格式输出任务清单：
 
 用户原始指令：......
@@ -2064,14 +2060,22 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
 
 """
 
+    user_prompt = f"""请结合历史上下文分析用户输入并生成任务清单。
+### 历史上下文:
+{json.dumps(history, ensure_ascii=False)}
+
+### 用户输入:
+{user_text}
+"""
+
     planning_messages = [
         {"role": "system", "content": planning_prompt},
-        {"role": "user", "content": "请分析用户的输入并生成任务清单。"},
+        {"role": "user", "content": user_prompt},
     ]
     # if history:
     #     planning_messages.insert(1, {"role": "user", "content": "以下是历史上下文：\n" + json.dumps(history, ensure_ascii=False)})
 
-    assistant_message = chat_once(client, model, planning_messages, temperature=0.2, debug_enabled=debug_enabled)
+    assistant_message = chat_once(client, model, planning_messages, temperature=0.2, debug_enabled=debug_enabled, disable_tools=True)
     return (assistant_message.content or "").strip() or user_text
 
 
@@ -2313,9 +2317,6 @@ def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_pr
     sys_prompt = f"""
 你是提示词优化专家，负责将对话记录整理为更清晰、可执行的最终任务提示词。
 
-### 对话记录
-{compiled_text}
-
 ### 生成最终提示词时，请严格遵循以下约束：
 1. 只输出最终改进后的提示词文本，不要添加任何解释、元信息或注释。
 2. 保留用户原始目标、关键上下文、澄清或变更后的要求、待执行步骤与预期产物。
@@ -2325,8 +2326,13 @@ def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_pr
 
 """
 
+    user_prompt = f"""分析对话记录帮我生成最终提示词,把最终提示词内容输出给我。
+### 对话记录
+{compiled_text}
+"""
+
     try:
-        assistant_message = chat_once(client, model, [{"role": "system", "content": sys_prompt}, {"role": "user", "content": "帮我生成最终提示词,把最终提示词内容输出给我。"}], temperature=0.2, debug_enabled=debug_enabled)
+        assistant_message = chat_once(client, model, [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}], temperature=0.2, debug_enabled=debug_enabled, disable_tools=True)
     except Exception:
         logger.exception(t("task_end_generation_failed_log"))
         console.print(Panel.fit(traceback.format_exc(), title=t("task_end_generate_failed")))
