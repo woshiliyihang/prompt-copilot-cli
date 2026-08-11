@@ -88,36 +88,56 @@ def format_cumulative_token_summary() -> str:
     )
 
 
+def clear_task_memory_file() -> None:
+    MEMORY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_FILE_PATH.write_text("# Task Execution Memory\n\n", encoding="utf-8")
+
+
+def append_task_memory_entry(text: str) -> None:
+    MEMORY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with MEMORY_FILE_PATH.open("a", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+
+
+def summarize_memory_value(value: Any, max_len: int = 240) -> str:
+    if isinstance(value, str):
+        if len(value) > max_len:
+            return value[: max_len - 20] + f"... (truncated, len={len(value)})"
+        return value
+
+    if isinstance(value, (dict, list)):
+        try:
+            serialized = json.dumps(value, ensure_ascii=False)
+        except Exception:
+            serialized = str(value)
+        if len(serialized) > max_len:
+            return serialized[: max_len - 20] + f"... (truncated, len={len(serialized)})"
+        return serialized
+
+    return str(value)
+
+
+def summarize_tool_result(result: Any) -> str:
+    if isinstance(result, dict):
+        status = result.get("status")
+        content = result.get("content")
+        content_summary = summarize_memory_value(content, max_len=200)
+        extra_items = [
+            f"{k}={summarize_memory_value(v, max_len=80)}"
+            for k, v in result.items()
+            if k not in {"status", "content"}
+        ]
+        extra_text = f" | {", ".join(extra_items)}" if extra_items else ""
+        return f"status={status}{extra_text}\nContent: {content_summary}"
+    return summarize_memory_value(result)
+
+
 def build_bottom_toolbar_text() -> str:
     base = t("toolbar_help")
     token_summary = format_cumulative_token_summary()
     return f"{token_summary} | {base}"
-
-
-
-
-ZH_SYSTEM_PROMPT = f"""
-你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。
-
-工作原则：
-1、先检查工作目录并理解需求。
-2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。
-3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。
-4、如果需要，输出简洁的说明与下一步建议。
-5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。
-6、当用户输入指令：/task-start 的时候,直接回复：请输入你的第一条初始提示。
-7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。
-8、在任务处理中，工具调用会产生大量中间信息，而对话只保存有限几轮上下文。你应引入记事本方式，记录关键工具结果、分析结论和中间状态，以便后续步骤访问和参考。
-9、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
-10、如果用户想“查看图片内容”，应优先调用图片读取工具。
-11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时执行每个步骤的时候明确说明当前环节与进度，实时反馈任务状态。
-12、使用 execute_python_script 时必须在脚本内自行管理进程生命周期：若是 ls、pytest、build 等短命令用 subprocess.run 显式设置 timeout，若是 npm run dev、flask run 等常驻服务用 subprocess.Popen 脱离终端启动并在脚本内轮询健康检查 URL，确认就绪后打印 PID 并立即 sys.exit() 退出以防触发 360 秒强制超时。
-13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
-14、脱离终端启动常驻服务时务必兼顾跨平台兼容：Linux/Mac 环境设置 start_new_session=True，Windows 环境设置 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP。
-15、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），严禁在脚本内同步阻塞，必须用 subprocess.Popen 跨平台脱离终端启动并将进度心跳写入本地日志文件，打印 PID 后立即 sys.exit()，工具 timeout_seconds 设为 15 秒仅验证启动；后续须通过检查日志监控进度，若发现任务完成或长时间无心跳更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
-16、如果需要搜索互联网信息时候优先使用中国国内搜索引擎优先，例如：bing、百度等。
-
-"""
 
 
 TRANSLATIONS = {
@@ -243,14 +263,37 @@ def t(key: str, **kwargs: Any) -> str:
         return text.format(**kwargs)
     return text
 
+MEMORY_FILE_PATH = ROOT / "memory.md"
+
+DEFAULT_SYSTEM_PROMPT = f"""
+你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。
+
+工作原则：
+1、先检查工作目录并理解需求。
+2、优先使用网络搜索类工具搜索网络实时信息，例如：天气、新闻、资讯等等。
+3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。
+4、如果需要，输出简洁的说明与下一步建议。
+5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。
+6、当用户输入指令：/task-start 的时候,直接回复：请输入你的第一条初始提示。
+7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。
+8、在任务处理中，工具调用会产生大量中间信息，而对话只保存有限几轮上下文,在生成最终结果或者是某些步骤需要回溯前面缺失的历史信息的时候可以读取记忆文件:{MEMORY_FILE_PATH}。
+9、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
+10、如果用户想“查看图片内容”，应优先调用图片读取工具。
+11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时执行每个步骤的时候明确说明当前环节与进度，实时反馈任务状态。
+12、使用 execute_python_script 时必须在脚本内自行管理进程生命周期：若是 ls、pytest、build 等短命令用 subprocess.run 显式设置 timeout，若是 npm run dev、flask run 等常驻服务用 subprocess.Popen 脱离终端启动并在脚本内轮询健康检查 URL，确认就绪后打印 PID 并立即 sys.exit() 退出以防触发 360 秒强制超时。
+13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
+14、脱离终端启动常驻服务时务必兼顾跨平台兼容：Linux/Mac 环境设置 start_new_session=True，Windows 环境设置 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP。
+15、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），严禁在脚本内同步阻塞，必须用 subprocess.Popen 跨平台脱离终端启动并将进度心跳写入本地日志文件，打印 PID 后立即 sys.exit()，工具 timeout_seconds 设为 15 秒仅验证启动；后续须通过检查日志监控进度，若发现任务完成或长时间无心跳更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
+16、如果需要搜索互联网信息时候优先使用中国国内搜索引擎优先，例如：bing、百度等。
+
+"""
 
 UI_SYSTEM_LANGUAGE = "en"
 APPLICATION_VERSION = "0.2.8"
-DEFAULT_SYSTEM_PROMPT = ZH_SYSTEM_PROMPT
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
-DEFAULT_MAX_CHAT_COUNT = 7
+DEFAULT_MAX_CHAT_COUNT = 6
 CHAT_MESSAGE_MAX_COUNT = 8
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
 RE_ACTION_DELAY = 1 # unit: seconds
@@ -1963,6 +2006,7 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
 
     planning_prompt = f"""
 你是一个编程行业需求分析专家，你能够通过历史上下文和用户的输入分析出用户的真实意图，能够拆分步骤，并且能够生成任务执行清单。
+在任务处理中，工具调用会产生大量中间信息，而对话只保存有限几轮上下文,在生成最终结果或者是某些步骤需要回溯前面缺失的历史信息的时候可以读取记忆文件:{MEMORY_FILE_PATH}。
 
 ### 请严格按照以下格式输出任务清单：
 
@@ -2006,6 +2050,9 @@ def is_special_command(user_text: str) -> bool:
 
 def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, user_text: str, debug_enabled: bool = False, recorder: ConversationRecorder | None = None) -> None:
     reset_interruption_state()
+    clear_task_memory_file()
+    append_task_memory_entry(f"## Task started\n\nUser request: {summarize_memory_value(user_text, max_len=240)}\n\n")
+
     history = session_store.load()
     planned_user_text = user_text
     if not is_special_command(user_text):
@@ -2013,6 +2060,8 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
             planned_user_text = plan_user_request(client, model, history, user_text, debug_enabled=debug_enabled)
         except Exception:
             logger.exception("Planning step failed; continuing with original user input")
+
+    append_task_memory_entry("## Task checklist\n\n" + summarize_memory_value(planned_user_text, max_len=10000) + "\n\n")
 
     first_task_prompt = {"role": "user", "content": planned_user_text}
     history.append(first_task_prompt)
@@ -2089,6 +2138,12 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                 result = execute_tool_call(tc)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
                 show_tool_result(tc, result)
+                append_task_memory_entry(
+                    "### Tool invocation\n\n"
+                    f"Tool: {tc.function.name}\n\n"
+                    f"Arguments: {summarize_memory_value(tc.function.arguments, max_len=1200)}\n\n"
+                    f"Result: {summarize_tool_result(result)}\n\n"
+                )
                 # end_calling_tips = f"tool={tc.function.name}\nresult={json.dumps(result, ensure_ascii=False)}"
                 # show_stage(t("tool_call_finished"), end_calling_tips[:80])
 
@@ -2118,6 +2173,12 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                 error_payload = {"status": "error", "content": traceback.format_exc()}
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(error_payload, ensure_ascii=False)})
                 console.print(Panel.fit(traceback.format_exc(), title=t("tool_execution_error")))
+                append_task_memory_entry(
+                    "### Tool invocation\n\n"
+                    f"Tool: {tc.function.name}\n\n"
+                    f"Arguments: {summarize_memory_value(tc.function.arguments, max_len=1200)}\n\n"
+                    f"Result: ERROR\n{summarize_tool_result(error_payload)}\n\n"
+                )
                 # if recorder:
                 #     recorder.record_error(traceback.format_exc())
 
