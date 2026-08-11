@@ -7,7 +7,7 @@ name = "prompt-copilot-cli"
 version = "0.2.9"
 description = "A lightweight terminal-based coding agent with file tools, command execution, multimodal image support, and MCP integration."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10,<3.15"
 authors = [{ name = "Jason Li" }]
 keywords = ["cli", "agent", "openai", "mcp", "coding-assistant"]
