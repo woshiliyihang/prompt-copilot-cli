@@ -2137,7 +2137,6 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
 
         for tc in tool_calls:
             try:
-                tool_desc = get_tool_description(tc)
                 result = execute_tool_call(tc)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
                 show_tool_result(tc, result)
