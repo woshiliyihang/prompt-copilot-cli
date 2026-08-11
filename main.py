@@ -2033,8 +2033,6 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
         {"role": "system", "content": planning_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    # if history:
-    #     planning_messages.insert(1, {"role": "user", "content": "以下是历史上下文：\n" + json.dumps(history, ensure_ascii=False)})
 
     assistant_message = chat_once(client, model, planning_messages, temperature=0.2, debug_enabled=debug_enabled, disable_tools=True)
     return (assistant_message.content or "").strip() or user_text
@@ -2125,16 +2123,21 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
             ],
         }
         messages.append(assistant_call_message)
-        # if recorder:
-        #     recorder.record_assistant(assistant_message.content or "开始调用方法function calling...")
+
+        function_content = getattr(assistant_message,"content",None) or ""
+        function_reasoning = getattr(assistant_message,"reasoning",None) or ""
+        function_content_reasoning = getattr(assistant_message,"content_reasoning",None) or ""
+        final_reasoning = function_reasoning or function_content_reasoning or function_content
+        append_task_memory_entry(
+            "### The reason for the assistant to call the function\n\n"
+            f"{final_reasoning}\n\n"
+        )
+
+        show_stage(t("starting_tool_call"), f"reasoning:\n{final_reasoning}")
 
         for tc in tool_calls:
             try:
                 tool_desc = get_tool_description(tc)
-                start_calling_tips = f"tool={tc.function.name}\ndescription={tool_desc}\narguments={tc.function.arguments}"
-                show_stage(t("starting_tool_call"), start_calling_tips[:80])
-                # if recorder:
-                #     recorder.record_tool_start(tc.function.name, tc.function.arguments)
                 result = execute_tool_call(tc)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
                 show_tool_result(tc, result)
@@ -2144,8 +2147,6 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                     f"Arguments: {summarize_memory_value(tc.function.arguments, max_len=1200)}\n\n"
                     f"Result: {summarize_tool_result(result)}\n\n"
                 )
-                # end_calling_tips = f"tool={tc.function.name}\nresult={json.dumps(result, ensure_ascii=False)}"
-                # show_stage(t("tool_call_finished"), end_calling_tips[:80])
 
                 if tc.function.name == "read_image_as_base64":
                     try:
@@ -2160,13 +2161,9 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                             messages.append(image_message)
                     except Exception:
                         logger.exception("Failed to append multimodal image message")
-                # if recorder:
-                #     recorder.record_tool_result(tc.function.name, result)
             except KeyboardInterrupt:
                 logger.info("Tool execution interrupted by user, tool=%s", tc.function.name)
                 console.print(Panel.fit(t("current_tool_cancelled"), title=t("interrupted_title")))
-                # if recorder:
-                #     recorder.record_error(f"用户中断工具执行: {tc.function.name}")
                 return
             except Exception:
                 logger.exception("Tool execution error, tool=%s", tc.function.name)
@@ -2179,8 +2176,6 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                     f"Arguments: {summarize_memory_value(tc.function.arguments, max_len=1200)}\n\n"
                     f"Result: ERROR\n{summarize_tool_result(error_payload)}\n\n"
                 )
-                # if recorder:
-                #     recorder.record_error(traceback.format_exc())
 
 import json
 from typing import List, Union
