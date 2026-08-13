@@ -1,6 +1,6 @@
 from __future__ import annotations
-from config import INTERRUPTION_REQUESTED
 from config import TOOL_SUBPROCESS_TIMEOUT
+from config import logger
 from config import t
 from mcp import ACTIVE_MCP_TOOL_DEFINITIONS
 from mcp import run_mcp_tool
@@ -12,12 +12,9 @@ from typing import Any
 from typing import List, Union
 import base64
 import json
-import logging
 import os
 import shutil
 import sys
-
-logger = logging.getLogger("cli_agent")
 
 TOOL_DEFINITIONS = [
     {

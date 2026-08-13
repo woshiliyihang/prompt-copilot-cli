@@ -2,12 +2,12 @@ from __future__ import annotations
 from cli import show_stage
 from config import MODEL_REQUEST_TIMEOUT_SECONDS
 from config import RE_ACTION_DELAY
+from config import logger
 from config import t
 from mcp import ACTIVE_MCP_TOOL_DEFINITIONS
 from openai import OpenAI
 from tools import TOOL_DEFINITIONS
 from tools import ensure_not_interrupted
-from tools import logger
 from types import SimpleNamespace
 from typing import Any
 import json

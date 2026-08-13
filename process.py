@@ -1,11 +1,11 @@
 from __future__ import annotations
 from config import ROOT
+from config import console
+from config import logger
 from config import t
 from datetime import datetime, timezone
-from mcp import console
 from pathlib import Path
 from rich.panel import Panel
-from tools import logger
 from typing import Any
 import os
 import platform

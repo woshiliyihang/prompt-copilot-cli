@@ -1,13 +1,10 @@
 from __future__ import annotations
-from datetime import datetime, timezone
 from openai import OpenAI
 from pathlib import Path
+from rich.console import Console
 from typing import Any
 import json
-import platform
-import shutil
-import subprocess
-import sys
+import logging
 
 ROOT = Path.home() / ".prompt-copilot"
 
@@ -214,50 +211,15 @@ CONFIG_FIELD_DESCRIPTIONS = {
     "mcp": t("config_field_mcp"),
 }
 
+console = Console()
+
+logger = logging.getLogger("cli_agent")
+
 ACTIVE_MCP_TOOL_CONFIG: dict[str, Any] = {}
 
 ACTIVE_MCP_TOOL_CONFIGS: list[dict[str, Any]] = []
 
 ACTIVE_MCP_TOOL_SERVER_BY_NAME: dict[str, dict[str, Any]] = {}
-
-INTERRUPTION_REQUESTED = False
-
-def get_version_from_command(command: list[str]) -> str:
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=10,
-        )
-        stdout = result.stdout or ''
-        output = stdout.strip().splitlines()[0] if stdout.strip() else ''
-        return output or t("not_detected")
-    except Exception:
-        return t("not_detected")
-
-def build_device_environment_context(workdir: str) -> str:
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    os_name = platform.system() or t("unknown") if False else platform.system() or 'Unknown'
-    os_release = platform.release() or 'Unknown'
-    os_version = platform.version() or 'Unknown'
-    os_arch = platform.machine() or 'Unknown'
-    python_version = platform.python_version() or sys.version.split()[0]
-    node_path = shutil.which('node')
-    node_version = get_version_from_command(['node', '--version']) if node_path else t("not_detected")
-    npm_version = get_version_from_command(['npm', '--version']) if shutil.which('npm') else t("not_detected")
-
-    return (
-        t("device_environment") + "\n"
-        + t("device_time") + now + "\n"
-        + t("device_os")
-        + f"system={os_name}, release={os_release}, version={os_version}, arch={os_arch}\n"
-        + t("device_software")
-        + f"python={python_version}, node={node_version}, npm={npm_version}\n"
-        + t("device_workdir") + workdir
-    )
 
 def _format_config_field_help() -> str:
     lines = [t("config_header")]

@@ -2,19 +2,17 @@ from __future__ import annotations
 from config import ACTIVE_MCP_TOOL_CONFIG
 from config import ACTIVE_MCP_TOOL_CONFIGS
 from config import ACTIVE_MCP_TOOL_SERVER_BY_NAME
+from config import console
+from config import logger
 from config import t
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from rich.console import Console
 from rich.panel import Panel
-from tools import logger
 from typing import Any
 import asyncio
 import traceback
-
-console = Console()
 
 ACTIVE_MCP_TOOL_DEFINITIONS: list[dict[str, Any]] = []
 
