@@ -1,0 +1,48 @@
+name: Validate modularized runtime dependencies
+
+on:
+  push:
+    branches:
+      - agent/modularize-main-v2
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Fix runtime imports
+        run: python scripts/fix_runtime_dependencies.py
+      - name: Validate syntax
+        run: python -m compileall -q main.py config.py session.py model.py mcp.py process.py tools.py cli.py
+      - name: Smoke import modules
+        run: python - <<'PY'
+          import config
+          import session
+          import mcp
+          import process
+          import tools
+          import model
+          import cli
+          import main
+          print('module import smoke test passed')
+          PY
+      - name: Remove temporary files
+        run: rm scripts/fix_runtime_dependencies.py .github/workflows/fix-runtime-dependencies.yml
+      - name: Commit fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add main.py cli.py model.py tools.py scripts/fix_runtime_dependencies.py .github/workflows/fix-runtime-dependencies.yml
+          git commit -m 'fix: resolve modularized runtime dependencies'
+          git push
