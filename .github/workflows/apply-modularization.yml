@@ -25,7 +25,8 @@ jobs:
       - name: Validate syntax
         run: python -m compileall -q main.py config.py session.py model.py mcp.py process.py tools.py cli.py
       - name: Validate AST
-        run: python - <<'PY'
+        run: |
+          python - <<'PY'
           import ast
           from pathlib import Path
           for name in ['main.py','config.py','session.py','model.py','mcp.py','process.py','tools.py','cli.py']:
