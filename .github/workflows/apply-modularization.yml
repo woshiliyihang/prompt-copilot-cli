@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/modularize-main-v2
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -21,7 +24,7 @@ jobs:
         run: python scripts/split_main.py
       - name: Validate syntax
         run: python -m compileall -q main.py config.py session.py model.py mcp.py process.py tools.py cli.py
-      - name: Validate imports
+      - name: Validate AST
         run: python - <<'PY'
           import ast
           from pathlib import Path
@@ -32,6 +35,7 @@ jobs:
       - name: Remove temporary refactor files
         run: rm scripts/split_main.py .github/workflows/apply-modularization.yml
       - name: Commit refactor
+        if: github.event_name == 'push'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
