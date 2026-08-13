@@ -26,7 +26,8 @@ jobs:
       - name: Validate syntax
         run: python -m compileall -q main.py config.py session.py model.py mcp.py process.py tools.py cli.py
       - name: Smoke import modules
-        run: python - <<'PY'
+        run: |
+          python - <<'PY'
           import config
           import session
           import mcp
