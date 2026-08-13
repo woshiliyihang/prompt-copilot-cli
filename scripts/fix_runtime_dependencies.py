@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,8 +25,11 @@ cli.write_text(text, encoding='utf-8')
 model = ROOT / 'model.py'
 text = model.read_text(encoding='utf-8')
 text = text.replace('from cli import show_stage\n', '', 1)
-if 'def chat_once(' in text and '    from cli import show_stage\n' not in text:
-    text = re.sub(r'(def chat_once\([^\n]*\) -> Any:\n)', r'\1    from cli import show_stage\n', text, count=1)
+marker = 'def chat_once('
+if marker in text and 'from cli import show_stage' not in text:
+    start = text.index(marker)
+    signature_end = text.index(' -> Any:', start) + len(' -> Any:')
+    text = text[:signature_end] + '\n    from cli import show_stage' + text[signature_end:]
 model.write_text(text, encoding='utf-8')
 
 tools = ROOT / 'tools.py'
