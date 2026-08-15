@@ -11,10 +11,8 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 import traceback
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -158,17 +156,11 @@ TRANSLATIONS = {
     "list_dir_desc": {"zh": "列出目录中的文件和子目录。", "en": "List files and subdirectories in the given directory."},
     "search_code_desc": {"zh": "在目录中按文本模式搜索匹配内容。", "en": "Search for matching text within a directory."},
     "edit_file_desc": {"zh": "在文件中替换指定文本。", "en": "Replace a specific string in a file."},
-    "execute_command_desc": {"zh": "在指定目录下执行 shell 命令。", "en": "Execute a shell command in the specified directory."},
-    "execute_python_script_desc": {"zh": "执行一个 Python 脚本或一段 Python 代码。", "en": "Execute a Python script or a block of Python code."},
     "path_desc": {"zh": "要读取的文件路径。", "en": "Path of the file to read."},
     "write_path_desc": {"zh": "要写入的目标文件路径。", "en": "Target file path to write to."},
     "content_desc": {"zh": "要写入的文件内容。", "en": "Content to write to the file."},
     "list_dir_path_desc": {"zh": "要列出的目录路径。", "en": "Directory path to list."},
     "list_dir_recursive_desc": {"zh": "是否递归遍历子目录。", "en": "Whether to recursively traverse subdirectories."},
-    "command_desc": {"zh": "要执行的命令。", "en": "Command to execute."},
-    "cwd_desc": {"zh": "执行命令的工作目录。", "en": "Working directory for the command."},
-    "script_desc": {"zh": "要执行的脚本内容。", "en": "Script content to execute."},
-    "script_cwd_desc": {"zh": "脚本执行工作目录。", "en": "Working directory for the script execution."},
     "interrupt": {"zh": "用户中断", "en": "Interrupted by user"},
     "not_detected": {"zh": "未检测到", "en": "Not detected"},
     "device_environment": {"zh": "设备工程环境：", "en": "Device environment:"},
@@ -202,7 +194,6 @@ TRANSLATIONS = {
     "config_error_title": {"zh": "配置错误", "en": "Configuration error"},
     "quota_hint": {"zh": "免费额度", "en": "free quota"},
     "tool_execution": {"zh": "开始执行工具：{name}，参数：{args}", "en": "Starting tool execution: {name}, args: {args}"},
-    "tool_result": {"zh": "{name} 结果：{result}", "en": "{name} result: {result}"},
     "tool_subprocess_failed": {"zh": "子进程启动失败，cwd=%s，回退到 %s: %s", "en": "Failed to start subprocess in cwd=%s, falling back to %s: %s"},
     "welcome_message": {
         "zh": "输入:\n/exit 退出，\n/clear 清空本地会话，\n/task-start 开始任务上下文，\n/task-end 生成最终提示。\nCtrl+C 可中断当前执行。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\npython main.py --reset-session\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-amc / --agent-messages-count：历史消息数量(推荐默认)\n-rd / --request-delay：请求间隔秒数(推荐默认)\n-hc / --history-count：会话轮次数量(推荐默认)\n--reset-session：重置本地会话记录。",
@@ -234,7 +225,6 @@ TRANSLATIONS = {
     "task_end_completed": {"zh": "已生成最终提示并写入: {path}", "en": "Final prompt generated and written to: {path}"},
     "task_end_done": {"zh": "Task End 完成", "en": "Task End complete"},
     "starting_tool_call": {"zh": "开始调用工具", "en": "Starting tool call"},
-    "tool_call_finished": {"zh": "调用工具结束", "en": "Tool call finished"},
     "current_tool_cancelled": {"zh": "已取消当前工具执行。", "en": "The current tool execution has been cancelled."},
     "cli_parser_description": {"zh": "Prompt Copilot CLI 编程 Agent", "en": "Prompt Copilot CLI coding agent"},
     "task_argument_help": {"zh": "一次性任务内容，适合单次执行。", "en": "One-off task content, suitable for a single run."},
@@ -250,7 +240,6 @@ TRANSLATIONS = {
     "context_size_label": {"zh": "提交上下文大小", "en": "Submitted context size"},
     "response_length_label": {"zh": "回复内容长度", "en": "Response content length"},
     "recent_conversations_header": {"zh": "# 最近对话记录", "en": "# Recent conversations"},
-    "task_end_user_message": {"zh": "对话记录（从 /task-start 开始，按时间从旧到新）：\n\n{compiled_text}", "en": "Conversation history (starting from /task-start, from oldest to newest):\n\n{compiled_text}"},
     "task_end_generation_failed_log": {"zh": "调用模型生成最终提示失败", "en": "Failed to generate the final prompt with the model"},
     "final_prompt_header": {"zh": "# 最终提示词", "en": "# Final prompt"},
 }
@@ -715,8 +704,6 @@ def build_multimodal_user_message(
     }
 
 
-def build_multimodal_prompt_from_image(user_text: str, image_path: str | os.PathLike[str], max_bytes: int | None = None) -> list[dict[str, Any]]:
-    return [build_multimodal_user_message(user_text, image_path, max_bytes=max_bytes)]
 
 
 def resolve_execution_cwd(cwd: Any, fallback: str | os.PathLike[str] | None = None) -> str:
@@ -1035,203 +1022,16 @@ def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "content": traceback.format_exc()}
 
 
-def looks_like_background_service_command(command: Any) -> bool:
-    if isinstance(command, (list, tuple)):
-        text = " ".join(str(part) for part in command)
-    else:
-        text = str(command or "")
-
-    normalized = text.lower().strip()
-    if not normalized:
-        return False
-
-    background_markers = (
-        "npm run dev",
-        "npm start",
-        "pnpm dev",
-        "pnpm start",
-        "yarn dev",
-        "yarn start",
-        "vite",
-        "next dev",
-        "next start",
-        "uvicorn",
-        "flask run",
-        "gunicorn",
-        "python app.py",
-        "python main.py",
-        "python manage.py runserver",
-        "python -m http.server",
-        "http.server",
-        "serve",
-        "watch",
-    )
-
-    if any(marker in normalized for marker in background_markers):
-        return True
-
-    if normalized.startswith(("python ", "py ")) and any(script in normalized for script in ("app.py", "main.py", "manage.py")):
-        return True
-
-    return False
 
 
-def _read_text_file_tail(path: str | os.PathLike[str], max_chars: int = 4000) -> str:
-    try:
-        p = Path(path)
-        if not p.exists():
-            return ""
-        text = p.read_text(encoding="utf-8", errors="replace")
-        if len(text) > max_chars:
-            return text[-max_chars:]
-        return text
-    except Exception:
-        return ""
 
 
-def stream_background_process_output(process: subprocess.Popen[Any], log_path: str | os.PathLike[str]) -> None:
-    log_file = Path(log_path)
-
-    def _watch_output() -> None:
-        last_position = 0
-        try:
-            if log_file.exists():
-                last_position = log_file.stat().st_size
-        except Exception:
-            last_position = 0
-
-        while process.poll() is None:
-            try:
-                if log_file.exists():
-                    with log_file.open("r", encoding="utf-8", errors="replace") as handle:
-                        handle.seek(last_position)
-                        chunk = handle.read()
-                        if chunk:
-                            last_position = handle.tell()
-                            if chunk.strip():
-                                console.print(chunk.rstrip(), style="dim")
-            except Exception:
-                pass
-            time.sleep(0.2)
-
-        try:
-            if log_file.exists():
-                with log_file.open("r", encoding="utf-8", errors="replace") as handle:
-                    handle.seek(last_position)
-                    chunk = handle.read()
-                    if chunk and chunk.strip():
-                        console.print(chunk.rstrip(), style="dim")
-        except Exception:
-            pass
-
-    threading.Thread(target=_watch_output, daemon=True).start()
 
 
-def start_background_process(command: Any, cwd: str, timeout_seconds: int | None = None, output_log_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-    safe_cwd = resolve_execution_cwd(cwd, Path.cwd())
-    log_path = Path(output_log_path).expanduser() if output_log_path else ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    startup_kwargs: dict[str, Any] = {
-        "cwd": safe_cwd,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.STDOUT,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-        "bufsize": 1,
-    }
-
-    if os.name == "nt":
-        startup_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
-    try:
-        if isinstance(command, (list, tuple)):
-            process = subprocess.Popen(list(command), start_new_session=True, **startup_kwargs)
-        else:
-            process = subprocess.Popen(str(command), shell=True, start_new_session=True, **startup_kwargs)
-    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
-        logger.warning(t("tool_subprocess_failed"), cwd, safe_cwd, exc)
-        return {"status": "error", "content": str(exc)}
-
-    def _drain_output() -> None:
-        try:
-            with log_path.open("a", encoding="utf-8") as handle:
-                while True:
-                    chunk = process.stdout.readline() if process.stdout is not None else ""
-                    if chunk == "":
-                        break
-                    handle.write(chunk)
-                    handle.flush()
-        except Exception:
-            pass
-
-    output_thread = threading.Thread(target=_drain_output, daemon=True)
-    output_thread.start()
-
-    if timeout_seconds is not None and timeout_seconds > 0:
-        def _watch_timeout() -> None:
-            try:
-                time.sleep(timeout_seconds)
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-                    with log_path.open("a", encoding="utf-8") as handle:
-                        handle.write(f"\n[timeout] process terminated after {timeout_seconds}s\n")
-                        handle.flush()
-            except Exception:
-                pass
-
-        threading.Thread(target=_watch_timeout, daemon=True).start()
-
-    console.print(Panel.fit(f"Streaming background output to {log_path}", title="Background process"))
-    stream_background_process_output(process, log_path)
-
-    return {
-        "status": "ok",
-        "content": f"Started background process (pid={process.pid})",
-        "pid": process.pid,
-        "cwd": safe_cwd,
-        "log_path": str(log_path),
-        "state": "running",
-    }
 
 
-def get_background_process_status(process_id: int, log_path: str | os.PathLike[str] | None = None, timeout_seconds: int | None = None) -> dict[str, Any]:
-    try:
-        process = subprocess.Popen(["ps", "-p", str(process_id), "-o", "pid="], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, _ = process.communicate(timeout=5)
-        running = bool(stdout and str(stdout).strip())
-    except Exception:
-        running = False
-
-    output_text = _read_text_file_tail(log_path) if log_path else ""
-    payload = {
-        "status": "running" if running else "completed",
-        "pid": process_id,
-        "log_path": str(log_path) if log_path else None,
-        "output_tail": output_text,
-    }
-    if timeout_seconds is not None and timeout_seconds > 0 and not running:
-        payload["timeout_seconds"] = timeout_seconds
-    return payload
 
 
-def wait_for_health_check(url: str, timeout_seconds: int = 20) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:
-                if getattr(response, "status", 0) < 500:
-                    return True
-        except Exception:
-            pass
-        time.sleep(0.5)
-    return False
 
 
 def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout: int | None = None) -> tuple[int, str, str]:
@@ -1294,132 +1094,10 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
 import os
 import signal
 import subprocess
-import uuid
 import time
 import platform
 from pathlib import Path
 
-def handle_execute_command(args):
-    command = args.get("command")
-    if not command:
-        return {"status": "error", "content": "Missing 'command' argument."}
-    
-    cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
-    
-    # 解析命令类型参数
-    is_background = args.get("background", False)
-    
-    # ================= 路径 A: 常驻服务 (保留你原有的优秀逻辑) =================
-    if is_background:
-        output_log_path = args.get("output_log_path") or args.get("log_path")
-        if not output_log_path:
-            output_log_path = ROOT / "logs" / "background" / f"cmd_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
-            
-        result = start_background_process(command, cwd, timeout_seconds=None, output_log_path=output_log_path)
-        
-        if result.get("status") == "ok":
-            health_check_url = args.get("health_check_url")
-            if health_check_url:
-                try:
-                    ready = wait_for_health_check(str(health_check_url), timeout_seconds=int(args.get("health_check_timeout", 20)))
-                    result["health_check_ready"] = ready
-                    result["content"] = f"Started background process (pid={result['pid']})" + (" and health check succeeded." if ready else " but health check did not succeed yet.")
-                except Exception:
-                    result["health_check_ready"] = False
-                    result["content"] = f"Started background process (pid={result['pid']})"
-            
-            time.sleep(0.5) # 防止竞态
-            result["output_tail"] = _read_text_file_tail(output_log_path, max_chars=4000)
-            return result
-        return result
-        
-    # ================= 路径 B: 一次性命令 (新增 Sentinel 同步等待逻辑) =================
-    else:
-        timeout_seconds = int(args.get("timeout_seconds") or args.get("timeout") or 120)
-        
-        # 生成唯一哨兵并组装命令 (跨平台适配错误码输出)
-        sentinel = f"@@CMD_DONE_{uuid.uuid4().hex}@@"
-        if platform.system() == "Windows":
-            full_cmd = f"{command}\necho {sentinel} %errorlevel%\n"
-        else:
-            full_cmd = f"{command}\necho {sentinel} $?\n"
-        
-        # 构建启动参数 (跨平台适配进程组)
-        popen_kwargs = {
-            "shell": True,
-            "cwd": str(cwd),
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.STDOUT,
-            "text": True,
-            "bufsize": 1,
-        }
-        
-        if platform.system() == "Windows":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            popen_kwargs["start_new_session"] = True
-            
-        process = subprocess.Popen(full_cmd, **popen_kwargs)
-        
-        output_lines = []
-        timed_out = False
-        start_time = time.time()
-        
-        try:
-            while True:
-                line = process.stdout.readline()
-                if not line:
-                    if time.time() - start_time > timeout_seconds:
-                        timed_out = True
-                        break
-                    continue
-                
-                if sentinel in line:
-                    # 提取退出码
-                    try:
-                        exit_code = int(line.split(sentinel)[-1].strip().rstrip())
-                    except:
-                        exit_code = -1
-                    break
-                else:
-                    output_lines.append(line)
-                    if len(output_lines) > 5000:
-                        output_lines.pop(0)
-                        
-                if time.time() - start_time > timeout_seconds:
-                    timed_out = True
-                    break
-        finally:
-            # 超时或完成后，杀掉整个进程树 (跨平台适配)
-            if process.poll() is None:
-                try:
-                    if platform.system() == "Windows":
-                        # Windows: taskkill 强杀整个进程树
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], 
-                                      capture_output=True, timeout=5)
-                    else:
-                        # Unix: 杀整个进程组
-                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                        time.sleep(1)
-                        if process.poll() is None:
-                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except Exception:
-                    pass
-        
-        content = "".join(output_lines)[-4000:]
-        
-        if timed_out:
-            return {
-                "status": "timeout",
-                "exit_code": None,
-                "content": f"{content}\n[ERROR] Command timed out after {timeout_seconds} seconds and was forcefully terminated.\n[Hint] If this is a dev server, please use background=true."
-            }
-        else:
-            return {
-                "status": "success" if exit_code == 0 else "error",
-                "exit_code": exit_code,
-                "content": content
-            }
 
 
 
@@ -2176,8 +1854,6 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                     f"Result: ERROR\n{summarize_tool_result(error_payload)}\n\n"
                 )
 
-import json
-from typing import List, Union
 
 def get_content_from_tool_calls(tool_calls: List) -> str:
     """
