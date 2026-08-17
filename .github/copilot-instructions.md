@@ -1,42 +1,63 @@
 # Copilot instructions for prompt-copilot-cli
 
-This file gives Copilot sessions repository-specific guidance to speed accurate, low-risk edits and tasks.
+## Architecture
 
-1) Build, test, and release
-- Build (local artifact): python -m build
-- Check built artifacts: python -m twine check dist/*
-- Publish to PyPI (used by repository script): python scripts\release.py --skip-upload  # validates build
-  - Full release (interactive / token): python scripts\release.py
-- Run tests (full suite): python -m pytest -q
-- Run a single test file: python -m pytest tests/test_cli_args.py -q
-- Run a single test case by name: python -m pytest tests/<file>::<test_name> -q
-- Alternative single-test selection: python -m pytest -k "substring_of_test_name" -q
+This repository is intentionally small. Do not reintroduce a handwritten agent loop, custom session store, custom message trimming, MCP runtime, or a second memory abstraction.
 
-(There is no centralized lint config in the repo; do not invent or add linter tooling without explicit PR.)
+- `main.py`: thin console entry point.
+- `copilot/cli.py`: terminal UX and CLI commands.
+- `copilot/agent.py`: composition root for `ChatOpenAI`, LangChain `create_agent`, middleware, tools, checkpointer, and store.
+- `copilot/tools.py`: only coding tools.
+- `copilot/memory.py`: LangGraph SQLite persistence and LangMem tools.
+- `copilot/config.py`: minimal JSON configuration.
 
-2) High-level architecture (big picture)
-- main.py: the CLI entry point and console script (console script: prompt-copilot). It parses args and drives the interactive agent.
-- Core capabilities are implemented as tools exposed to the interactive CLI: file operations, command execution, Python script execution, and an image->base64 helper for multimodal models.
-- MCP integration: the agent discovers and calls external MCP servers configured in the user config (see config locations below). MCP servers supply additional tools via the MCP protocol.
-- Packaging & release: scripts/release.py reads APPLICATION_VERSION from main.py, updates pyproject.toml, builds artifacts with PEP517 tooling, checks with twine, and uploads using a PyPI token.
-- Tests: located under tests/ and run with pytest.
+## Agent design rules
 
-3) Key repo-specific conventions
-- Version authoritative source: APPLICATION_VERSION in main.py. scripts/release.py syncs pyproject.toml to that value before building.
-- Console script: project defines prompt-copilot in pyproject (entry point main:main). Use that name for manual testing of installed package.
-- Config file (user-level):
-  - Windows: %USERPROFILE%\.prompt-copilot\config.json
-  - Unix: ~/.prompt-copilot/config.json
-  - Relevant keys: "model", "base_url", "api_key", "mcp" (enabled + servers array)
-- MCP discovery: mcp.servers in the config is the mechanism to provide external tools. Provide server objects matching MCP conventions.
-- Packaging: repo requires Python 3.10–3.14 (pyproject: requires-python >=3.10,<3.15).
+1. Use LangChain `create_agent()` for the model/tool loop.
+2. Use LangGraph `checkpointer` for short-term thread persistence.
+3. Use LangGraph `store` and LangMem for long-term memory.
+4. Use `SummarizationMiddleware` for long-context compression.
+5. Keep tools small, deterministic where practical, and return useful textual evidence.
+6. OpenAI-compatible providers are configured with `model`, `api_key`, and `base_url`.
+7. Do not add MCP, vector databases, custom ReAct loops, or custom message-window logic unless explicitly requested.
 
-4) Useful operational hints for Copilot sessions
-- Do not change version in pyproject.toml directly; update APPLICATION_VERSION in main.py and use scripts/release.py to propagate.
-- For quick local checks, run the console script against a temporary directory: prompt-copilot -d <path> -t "<task>".
-- When editing code that affects packaging or release flow, run python -m build and python -m twine check locally to validate artifacts before pushing.
+## Tools
 
-5) AI/assistant integration files
-- No repository-level Copilot-specific file was present prior to this commit; include config here so future sessions have a consistent baseline.
+The supported coding tool set is:
 
-Summary: created .github/copilot-instructions.md capturing build/test commands, architecture overview, and repo conventions. Want any additions (e.g., explicit test names to run, or an example MCP server config to add to README)?
+- `read_file`
+- `list_files`
+- `search_code`
+- `write_file`
+- `edit_file`
+- `delete_file`
+- `execute_python_script`
+- `execute_command`
+
+## Development
+
+Install:
+
+```text
+python -m pip install -e .
+```
+
+Run tests:
+
+```text
+python -m pytest
+```
+
+Run the CLI against a workspace:
+
+```text
+prompt-copilot -d <workspace>
+```
+
+The console entry point is `main:main`.
+
+## Persistence
+
+The local runtime uses SQLite for simplicity. `SqliteSaver` stores thread state and `SqliteStore` stores long-term memories in `~/.prompt-copilot/memory.db`.
+
+If a future deployment requires multiple processes or higher concurrency, prefer LangGraph's PostgreSQL saver/store rather than inventing another persistence layer.
