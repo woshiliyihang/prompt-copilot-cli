@@ -278,7 +278,7 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.6.0"
+APPLICATION_VERSION = "0.6.1"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
@@ -1669,7 +1669,7 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
 
 ### 请严格按照以下格式输出任务清单：
 
-我的原始指令：......
+用户原始输入：......
 
 接下来按步骤逐步执行完成任务：
 1、第一步：......

@@ -23,7 +23,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("-t", "--task", help="Run one task and exit")
     p.add_argument("-d", "--workdir", default=".", help="Agent workspace")
     p.add_argument("--reset-session", action="store_true", help="Reset the current workspace conversation")
-    p.add_argument("--version", action="version", version="prompt-copilot 0.5.9")
+    p.add_argument("--version", action="version", version="prompt-copilot 0.6.0")
     return p
 
 
