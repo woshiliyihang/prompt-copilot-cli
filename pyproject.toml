@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prompt-copilot-cli"
-version = "0.2.9"
-description = "A lightweight terminal-based coding agent with file tools, command execution, multimodal image support, and MCP integration."
+version = "0.3.0"
+description = "A lightweight terminal-based coding agent with file tools, command execution, multimodal image support, MCP integration, and a SQLite+FTS5 long-term memory system."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10,<3.15"
 authors = [{ name = "Jason Li" }]
-keywords = ["cli", "agent", "openai", "mcp", "coding-assistant"]
+keywords = ["cli", "agent", "openai", "mcp", "coding-assistant", "long-term-memory"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -40,3 +40,4 @@ prompt-copilot = "main:main"
 [tool.setuptools]
 include-package-data = true
 py-modules = ["main"]
+packages = ["copilot"]

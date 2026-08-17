@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 0.3.0
+
+- Refactored the single-file `main.py` (2100+ lines) into the `copilot` package: `i18n`, `globals_`, `prompts`, `config`, `session`, `memory`, `tools`, `mcp`, `llm`, `agent`, `cli`; `main.py` remains a thin entry point that re-exports the public API
+- Added a production-grade long-term memory system backed by SQLite + FTS5: durable storage at `~/.prompt-copilot/memory.db`, hybrid full-text (bm25) retrieval with CJK-friendly per-character segmentation plus a LIKE fallback, duplicate detection, secret and oversize rejection, and `/memory` plus `memory_search` / `memory_add` / `memory_list` / `memory_delete` tools
+- Relevant long-term memories are now retrieved and injected into the context before each task, and memories can be auto-extracted from completed tasks
+- Restored the `execute_command` tool with background-by-default execution, `start_background_process`, and health-check polling; short commands run synchronously with a sentinel-based exit code and a watchdog so silent commands cannot hang the agent
+- Restored bilingual working principles (`DEFAULT_SYSTEM_WORKING_PRINCIPLES_ZH` / `_EN`) and planning prompt guidance for command classification
+- Fixed context-window trimming: `trim_messages_window` no longer orphans tool-result messages from their assistant tool-call messages
+- Added a maximum tool-loop iteration cap so a model that keeps requesting tools cannot run forever
+- Fixed `ensure_config` to stop mutating the global default configuration on load
+- `execute_python_script` now writes unique temp scripts per invocation and always cleans them up
+- Added tests for the memory store, memory tools, and message trimming
+
+## Unreleased (prior)
+
 - Tool-call stage display now shows assistant reasoning instead of tool name and arguments
 - Task memory now records assistant reasoning when tool calls are initiated
 - Removed dead commented-out recorder and history-injection code

@@ -1,15 +1,16 @@
 # Prompt Copilot CLI
 
-Prompt Copilot CLI 是一个轻量级的终端编程 Agent，适合本地开发场景。它将 OpenAI 兼容模型与一组实用工具结合起来，包括文件操作、命令执行、Python 脚本运行、多模态图片处理以及 MCP 工具扩展。
+Prompt Copilot CLI 是一个轻量级的终端编程 Agent，适合本地开发场景。它将 OpenAI 兼容模型与一组实用工具结合起来，包括文件操作、命令执行、Python 脚本运行、多模态图片处理、MCP 工具扩展，以及基于 SQLite 的生产级长期记忆系统。
 
-它适合希望在终端中进行交互式开发、查看项目结构、修改文件、运行命令，并把多轮对话整理成最终可执行提示词的开发者。
+它适合希望在终端中进行交互式开发、查看项目结构、修改文件、运行命令、跨会话记住重要信息，并把多轮对话整理成最终可执行提示词的开发者。
 
 ## ✨ 功能特性
 
 - 终端交互式 CLI
 - 持久化会话历史与对话记录
+- **长期记忆**：SQLite + FTS5 全文检索（支持中文），任务开始前自动检索注入相关记忆，任务结束后可自动提炼沉淀
 - 文件系统工具：读取、写入、删除、重命名、复制、递归列出目录
-- 命令执行与 Python 脚本执行
+- 命令执行（默认后台执行并支持健康检查）与 Python 脚本执行
 - 支持视觉模型的图片处理：将图片读取并转成 base64
 - MCP 工具集成，便于扩展外部能力
 - 支持 `/task-start` 和 `/task-end` 的任务流，生成最终优化提示词
@@ -42,12 +43,23 @@ py -m pip install -U prompt-copilot-cli
   "api_key": "dummy",
   "temperature": 0.2,
   "debug": false,
+  "memory": {
+    "enabled": true,
+    "auto_extract": true,
+    "max_results": 3
+  },
   "mcp": {
     "enabled": true,
     "servers": []
   }
 }
 ```
+
+记忆配置说明：
+
+- `memory.enabled`：是否启用长期记忆系统及其工具
+- `memory.auto_extract`：任务结束后是否由模型自动提炼可复用记忆
+- `memory.max_results`：每次任务前注入上下文的相关记忆条数
 
 ### 3. MCP 配置（可选）
 
@@ -112,6 +124,7 @@ prompt-copilot -t "创建一个简单的 HTML 落地页" -d D:\project_dir -l zh
 - `/clear`：清空本地会话历史
 - `/task-start`：开始任务上下文
 - `/task-end`：生成最终优化提示词并写入 `last-prompt.md`
+- `/memory`：列出最近的长期记忆条目
 
 ### 常用启动参数
 
@@ -167,10 +180,25 @@ Agent 可以调用这些工具：
   - `copy_file`
   - `list_dir`（支持递归）
 - 执行工具
-  - `execute_command`
+  - `execute_command`（默认后台执行；`background=false` 时同步等待并返回退出码；可通过 `health_check_url` 轮询就绪状态）
   - `execute_python_script`
+- 记忆工具
+  - `memory_search`
+  - `memory_add`
+  - `memory_list`
+  - `memory_delete`
 - 多模态工具
   - `read_image_as_base64`
+
+## 🧠 长期记忆
+
+Agent 维护一个生产级的长期记忆库，位于 `~/.prompt-copilot/memory.db`：
+
+- **存储**：SQLite 表存储简洁、自包含的记忆条目（类型 + 内容 + 时间），写入时自动去重。
+- **检索**：FTS5 全文排序（bm25），中文按字切分以支持 CJK 匹配，并带 `LIKE` 兜底；每次任务前将最相关的 `memory.max_results` 条记忆注入上下文。
+- **安全**：疑似包含密钥、密码、私钥、Bearer Token 的内容，或超过 300 字的内容，一律拒绝写入。
+- **自动提炼**：当 `memory.auto_extract` 开启时，任务结束后由模型从对话记录中提炼可复用记忆（事实、偏好、决策、经验）。
+- **管理**：用 `/memory` 查看条目，任务内可使用 `memory_*` 工具增删查改；支持按 ID 删除。
 
 ## 🧠 任务流
 
@@ -187,10 +215,19 @@ Agent 可以调用这些工具：
 
 ```text
 .
-├── main.py
-├── requirements.txt
-├── README.md
-├── README.zh-CN.md
+├── main.py               # 薄入口，重新导出公共 API
+├── copilot/              # 实现包
+│   ├── i18n.py           # 翻译与 t()
+│   ├── globals_.py       # 路径、设置、中断状态、token 统计
+│   ├── prompts.py        # 工作原则、规划提示词、任务记忆
+│   ├── config.py         # 配置加载、校验、客户端构建
+│   ├── session.py        # 持久化滑动窗口历史
+│   ├── memory.py         # SQLite + FTS5 长期记忆库
+│   ├── tools.py          # 工具定义与执行
+│   ├── mcp.py            # MCP 服务发现与调用
+│   ├── llm.py            # 模型调用封装
+│   ├── agent.py          # 规划、工具循环、对话记录
+│   └── cli.py            # 参数解析与交互循环
 ├── tests/
 └── workspace/
 ```

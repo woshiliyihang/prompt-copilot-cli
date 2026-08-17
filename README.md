@@ -1,15 +1,16 @@
 # Prompt Copilot CLI
 
-Prompt Copilot CLI is a lightweight terminal-based coding agent for local development workflows. It combines an OpenAI-compatible model with a set of practical tools for file operations, shell commands, Python execution, multimodal image handling, and MCP integrations.
+Prompt Copilot CLI is a lightweight terminal-based coding agent for local development workflows. It combines an OpenAI-compatible model with a set of practical tools for file operations, shell commands, Python execution, multimodal image handling, MCP integrations, and a SQLite-backed long-term memory system.
 
-It is designed for developers who want an interactive coding assistant that can inspect a workspace, edit files, run commands, and help turn multi-step conversations into a final, actionable prompt.
+It is designed for developers who want an interactive coding assistant that can inspect a workspace, edit files, run commands, remember important facts across sessions, and help turn multi-step conversations into a final, actionable prompt.
 
 ## ✨ Features
 
 - Interactive CLI experience in the terminal
 - Persistent session history and conversation logs
+- **Long-term memory**: SQLite + FTS5 full-text retrieval with CJK support; memories are retrieved before each task and can be auto-extracted afterwards
 - File-system tools for reading, writing, deleting, renaming, copying, and recursive directory listing
-- Shell command execution and Python script execution
+- Shell command execution (background by default, with health checks) and Python script execution
 - Image support for vision-capable models via image-to-base64 conversion
 - MCP tool integration for extending the agent with external tools
 - Task workflow with `/task-start` and `/task-end` to generate a polished final prompt
@@ -42,12 +43,23 @@ Example:
   "api_key": "dummy",
   "temperature": 0.2,
   "debug": false,
+  "memory": {
+    "enabled": true,
+    "auto_extract": true,
+    "max_results": 3
+  },
   "mcp": {
     "enabled": true,
     "servers": []
   }
 }
 ```
+
+Memory configuration options:
+
+- `memory.enabled` — turn the long-term memory system and its tools on/off
+- `memory.auto_extract` — automatically distill memories from finished tasks using the model
+- `memory.max_results` — number of memories injected into the context before each task
 
 ### 3. MCP configuration (optional)
 
@@ -113,6 +125,7 @@ Once the CLI starts, you can use these commands:
 - `/clear` — clear local session history
 - `/task-start` — start a task context for later summarization
 - `/task-end` — generate a final optimized prompt and save it to `last-prompt.md`
+- `/memory` — list the most recent long-term memory entries
 
 ### Common startup options
 
@@ -168,10 +181,25 @@ The agent can call the following tools:
   - `copy_file`
   - `list_dir` (with recursive option)
 - Execution tools
-  - `execute_command`
+  - `execute_command` (background by default; `background=false` for synchronous exit codes; `health_check_url` for readiness polling)
   - `execute_python_script`
+- Memory tools
+  - `memory_search`
+  - `memory_add`
+  - `memory_list`
+  - `memory_delete`
 - Multimodal tools
   - `read_image_as_base64`
+
+## 🧠 Long-term memory
+
+The agent maintains a production-grade long-term memory store at `~/.prompt-copilot/memory.db`:
+
+- **Storage**: SQLite table of concise, self-contained entries (kind + content + timestamp), deduplicated on write.
+- **Retrieval**: FTS5 full-text ranking (bm25) with per-character CJK segmentation, falling back to `LIKE` matching; the top `memory.max_results` hits are injected into the context before each task.
+- **Safety**: entries that look like secrets (API keys, passwords, private keys, bearer tokens) or exceed 300 characters are rejected.
+- **Auto-extraction**: when `memory.auto_extract` is enabled, the model distills reusable memories (facts, preferences, decisions, lessons) from the finished task transcript.
+- **Management**: use `/memory` to list entries, or the `memory_*` tools from within a task; entries can be deleted by ID.
 
 ## 🧠 Task flow
 
@@ -188,10 +216,19 @@ This is useful when you want to turn a long back-and-forth conversation into a c
 
 ```text
 .
-├── main.py
-├── requirements.txt
-├── README.md
-├── README.zh-CN.md
+├── main.py               # thin entry point, re-exports the public API
+├── copilot/              # implementation package
+│   ├── i18n.py           # translations and t()
+│   ├── globals_.py       # paths, settings, interruption, token accounting
+│   ├── prompts.py        # working principles, planning prompt, task memory
+│   ├── config.py         # config loading, validation, client construction
+│   ├── session.py        # persisted sliding-window history
+│   ├── memory.py         # SQLite + FTS5 long-term memory store
+│   ├── tools.py          # tool definitions and execution
+│   ├── mcp.py            # MCP server discovery and invocation
+│   ├── llm.py            # chat completion wrapper
+│   ├── agent.py          # planning, tool loop, conversation recording
+│   └── cli.py            # argument parsing and interactive loop
 ├── tests/
 └── workspace/
 ```
