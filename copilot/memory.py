@@ -1,18 +1,4 @@
-"""Production-grade long-term memory backed by SQLite + FTS5.
-
-Design goals:
-
-* **Durability** — memories live in ``~/.prompt-copilot/memory.db`` and
-  survive across sessions.
-* **Hybrid retrieval** — FTS5 full-text ranking (bm25) with CJK-friendly
-  per-character segmentation, plus a ``LIKE`` fallback for queries the
-  tokenizer cannot match.
-* **Safety** — entries are validated (non-empty, length-capped) and obvious
-  secrets (API keys, passwords, private keys, bearer tokens) are rejected.
-* **Zero extra dependencies** — sqlite3 ships with CPython; FTS5 is enabled
-  in every officially distributed build, and the store degrades to LIKE-only
-  search when it is not.
-"""
+"""SQLite-backed long-term memory with lightweight FTS5 retrieval."""
 from __future__ import annotations
 
 import json
@@ -59,7 +45,7 @@ class MemoryStore:
     def __init__(self, db_path: str | Path = MEMORY_DB_PATH):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn = sqlite3.connect(str(self.db_path), timeout=10)
         self._conn.row_factory = sqlite3.Row
         self.fts_enabled = self._ensure_schema()
 
@@ -78,14 +64,22 @@ class MemoryStore:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at)")
         try:
             conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content_seg)")
+            # A database can predate FTS5 support. When the FTS table is created
+            # later, it starts empty even though memories already exist, so
+            # backfill it once here. INSERT OR IGNORE keeps this idempotent.
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO memories_fts(rowid, content_seg)
+                SELECT id, ? || content || ? FROM memories
+                """,
+                (" ", " "),
+            )
             conn.commit()
             return True
         except sqlite3.OperationalError:
             logger.warning("FTS5 unavailable; long-term memory falls back to LIKE search")
             conn.commit()
             return False
-
-    # ------------------------------------------------------------------ write
 
     def add(self, content: str, kind: str = "fact") -> dict[str, Any]:
         text = (content or "").strip()
@@ -98,11 +92,8 @@ class MemoryStore:
 
         kind = kind if kind in VALID_KINDS else "fact"
         now = datetime.now(timezone.utc).isoformat()
-
         conn = self._conn
-        existing = conn.execute(
-            "SELECT id FROM memories WHERE content = ?", (text,)
-        ).fetchone()
+        existing = conn.execute("SELECT id FROM memories WHERE content = ?", (text,)).fetchone()
         if existing is not None:
             return {"status": "ok", "id": existing["id"], "duplicate": True}
 
@@ -129,8 +120,6 @@ class MemoryStore:
             conn.execute("DELETE FROM memories_fts WHERE rowid = ?", (int(memory_id),))
         conn.commit()
         return True
-
-    # ------------------------------------------------------------------- read
 
     def list_recent(self, limit: int = 10) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -169,7 +158,6 @@ class MemoryStore:
                     results = []
 
         if not results:
-            # LIKE fallback keeps recall for queries the tokenizer cannot match.
             like = f"%{query.strip()}%"
             rows = self._conn.execute(
                 """
@@ -194,7 +182,6 @@ _default_store: MemoryStore | None = None
 
 
 def default_store() -> MemoryStore:
-    """Return the process-wide store rooted at ``MEMORY_DB_PATH``."""
     global _default_store
     if _default_store is None:
         _default_store = MemoryStore(MEMORY_DB_PATH)
@@ -209,7 +196,6 @@ def reset_default_store() -> None:
 
 
 def format_memories_for_prompt(memories: list[dict[str, Any]]) -> str:
-    """Render retrieved memories as a compact block for prompt injection."""
     from .i18n import t
 
     if not memories:
@@ -219,8 +205,6 @@ def format_memories_for_prompt(memories: list[dict[str, Any]]) -> str:
         lines.append(f"- [{item.get('kind', 'fact')}] {item.get('content', '')}")
     return "\n".join(lines)
 
-
-# ----------------------------------------------------------- auto extraction
 
 EXTRACTION_SYSTEM_PROMPT_ZH = """\
 你是记忆提炼助手。请从下面的任务对话记录中提取值得跨会话长期保存的信息，只提取：
@@ -252,16 +236,13 @@ Rules:
 
 
 def parse_extracted_memories(raw_text: str) -> list[str]:
-    """Parse the model reply into a list of memory strings, tolerating fences."""
     text = (raw_text or "").strip()
     if not text:
         return []
-    # Strip common code fences.
     if text.startswith("```"):
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:]
-    # Locate the first JSON array.
     start = text.find("[")
     end = text.rfind("]")
     if start == -1 or end == -1 or end <= start:
@@ -280,10 +261,6 @@ def parse_extracted_memories(raw_text: str) -> list[str]:
 
 
 def extract_memories_via_model(client: Any, model: str, transcript: str, language: str) -> list[str]:
-    """Ask the model to distill long-term memories from *transcript*.
-
-    Import of ``chat_once`` is deferred to avoid circular imports.
-    """
     from .llm import chat_once
 
     system_prompt = (
@@ -304,7 +281,6 @@ def auto_extract_memories(
     language: str,
     store: MemoryStore | None = None,
 ) -> int:
-    """Extract and persist memories; returns the number of newly stored entries."""
     target = store or default_store()
     if not (transcript or "").strip():
         return 0
