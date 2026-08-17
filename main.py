@@ -28,6 +28,7 @@ from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.panel import Panel
 from types import SimpleNamespace
+import re
 
 
 ROOT = Path.home() / ".prompt-copilot"
@@ -278,7 +279,7 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.6.1"
+APPLICATION_VERSION = "0.6.2"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
@@ -1479,6 +1480,24 @@ def show_tool_result(tool_call: Any, result: dict[str, Any]) -> None:
     )
 
 
+def _filter_think_tags(content: str) -> str:
+    """Remove <think>..</think> and standalone <think/> tags and their contents.
+
+    - Removes any content between an opening <think> (or <think/>) and a closing </think>.
+    - Removes standalone tags like <think/> or <think>.
+    """
+    if not content:
+        return content
+
+    between_re = re.compile(r"<think\s*/?>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
+    result = between_re.sub("", content)
+
+    tag_re = re.compile(r"<think\s*/?>", flags=re.IGNORECASE)
+    result = tag_re.sub("", result)
+
+    return result
+
+
 def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False, disable_tools:bool = False) -> Any:
     ensure_not_interrupted()
     wait_for_model_call_interval()
@@ -1511,6 +1530,12 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
             update_total_token_usage(usage)
 
         response_content = assistant_message.content or ""
+        # Strip out internal <think> tags from model content
+        try:
+            response_content = _filter_think_tags(response_content)
+            assistant_message.content = response_content
+        except Exception:
+            pass
         response_length = len(str(response_content))
         usage_summary = format_usage_summary(usage)
         show_stage(
