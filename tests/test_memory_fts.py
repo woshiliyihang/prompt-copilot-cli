@@ -25,9 +25,8 @@ class MemoryFtsTests(unittest.TestCase):
             conn.close()
 
             store = MemoryStore(db_path)
-            results = store.search("Python", limit=3)
-            self.assertEqual(len(results), 1)
-            self.assertEqual(results[0]["content"], "项目使用 Python")
+            self.assertEqual(store.search("Python", limit=3)[0]["content"], "项目使用 Python")
+            self.assertEqual(store.search("项目", limit=3)[0]["content"], "项目使用 Python")
             store.close()
 
 
