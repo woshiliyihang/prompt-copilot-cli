@@ -64,16 +64,15 @@ class MemoryStore:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at)")
         try:
             conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content_seg)")
-            # A database can predate FTS5 support. When the FTS table is created
-            # later, it starts empty even though memories already exist, so
-            # backfill it once here. INSERT OR IGNORE keeps this idempotent.
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO memories_fts(rowid, content_seg)
-                SELECT id, ? || content || ? FROM memories
-                """,
-                (" ", " "),
-            )
+            # If FTS5 is enabled after memories already exist, the newly-created
+            # FTS table is empty. Backfill through the same CJK segmentation
+            # path used by normal writes so Chinese retrieval remains correct.
+            existing_rows = conn.execute("SELECT id, content FROM memories").fetchall()
+            for row in existing_rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO memories_fts(rowid, content_seg) VALUES (?, ?)",
+                    (int(row["id"]), _segment(str(row["content"]))),
+                )
             conn.commit()
             return True
         except sqlite3.OperationalError:
