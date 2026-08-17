@@ -4,18 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prompt-copilot-cli"
-version = "0.3.0"
-description = "A lightweight terminal-based coding agent with file tools, command execution, multimodal image support, MCP integration, and a SQLite+FTS5 long-term memory system."
+version = "0.4.0"
+description = "A simple terminal coding agent built on LangChain with OpenAI-compatible models and durable memory."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10,<3.15"
 authors = [{ name = "Jason Li" }]
-keywords = ["cli", "agent", "openai", "mcp", "coding-assistant", "long-term-memory"]
+keywords = ["cli", "agent", "langchain", "langgraph", "openai-compatible", "coding-assistant"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -23,8 +22,11 @@ classifiers = [
   "Topic :: Utilities",
 ]
 dependencies = [
-  "mcp>=1.28.0,<2.0.0",
-  "openai>=1.109.1,<2.0.0",
+  "langchain>=1.3,<2.0",
+  "langchain-openai>=1.1,<2.0",
+  "langgraph>=1.2,<2.0",
+  "langgraph-checkpoint-sqlite>=3.0,<4.0",
+  "langmem>=0.0.29,<1.0",
   "prompt_toolkit>=3.0.52,<4.0.0",
   "rich>=15.0.0,<16.0.0",
 ]
