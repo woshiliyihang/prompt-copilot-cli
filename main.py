@@ -279,7 +279,7 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.6.2"
+APPLICATION_VERSION = "0.6.3"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
@@ -1502,15 +1502,23 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
     ensure_not_interrupted()
     wait_for_model_call_interval()
     tool_definitions = TOOL_DEFINITIONS + ACTIVE_MCP_TOOL_DEFINITIONS
+    request_payload = None
     if disable_tools:
-        tool_definitions = []
-    request_payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "tools": tool_definitions,
-        "tool_choice": "auto",
-    }
+        request_payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                }
+    else:
+        request_payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "tools": tool_definitions,
+        }
+        # Only include tool_choice when tools are provided; some backends reject it otherwise
+        if tool_definitions:
+            request_payload["tool_choice"] = "auto"
     request_timeout = getattr(client, "timeout", None)
     if request_timeout is None:
         request_timeout = MODEL_REQUEST_TIMEOUT_SECONDS
