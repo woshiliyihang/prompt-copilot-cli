@@ -278,7 +278,7 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.2.9"
+APPLICATION_VERSION = "0.5.9"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
