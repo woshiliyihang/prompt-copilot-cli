@@ -1,11 +1,9 @@
-"""CLI entry point: argument parsing, startup wiring and the interactive loop."""
+"""CLI entry point: argument parsing, startup wiring and interactive loop."""
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +27,7 @@ from .globals_ import (
     settings,
 )
 from .i18n import set_language, t
-from .memory import default_store, format_memories_for_prompt
+from .memory import default_store
 from .mcp import discover_mcp_tools
 from .session import SessionStore
 from .ui import console
@@ -61,24 +59,34 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--agent-messages-count",
         type=int,
         default=8,
-        help="number of messages to keep per model request (default: 8)",
+        help="number of messages to keep per model request (minimum: 2; default: 8)",
     )
     parser.add_argument(
         "-rd",
         "--request-delay",
         type=float,
         default=1,
-        help="delay in seconds between model requests (default: 1)",
+        help="delay in seconds between model requests (minimum: 0; default: 1)",
     )
     parser.add_argument(
         "-hc",
         "--history-count",
         type=int,
         default=6,
-        help="number of messages to persist in session history (default: 6)",
+        help="number of messages to persist in session history (minimum: 2; default: 6)",
     )
     parser.add_argument("--reset-session", action="store_true", help=t("reset_session_help"))
     return parser
+
+
+def _validate_runtime_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Reject values that make context management or request pacing invalid."""
+    if args.agent_messages_count < 2:
+        parser.error("--agent-messages-count must be >= 2")
+    if args.history_count < 2:
+        parser.error("--history-count must be >= 2")
+    if args.request_delay < 0:
+        parser.error("--request-delay must be >= 0")
 
 
 def _handle_memory_command() -> None:
@@ -92,6 +100,13 @@ def _handle_memory_command() -> None:
     for row in rows:
         lines.append(f"#{row['id']} [{row['kind']}] {row['created_at']}  {row['content']}")
     console.print(Panel.fit("\n".join(lines), title=t("memory_title")))
+
+
+def _clear_recent_conversations() -> None:
+    if RECENT_CONVERSATIONS_PATH.exists():
+        RECENT_CONVERSATIONS_PATH.write_text(
+            t("recent_conversations_header") + "\n\n", encoding="utf-8"
+        )
 
 
 def interactive_loop(
@@ -132,10 +147,7 @@ def interactive_loop(
             return
         if stripped == "/clear":
             session_store.save([])
-            if RECENT_CONVERSATIONS_PATH.exists():
-                RECENT_CONVERSATIONS_PATH.write_text(
-                    t("recent_conversations_header") + "\n\n", encoding="utf-8"
-                )
+            _clear_recent_conversations()
             console.print(t("clear_session_message"))
             continue
         if stripped == "/task-end":
@@ -152,6 +164,8 @@ def interactive_loop(
             continue
         if stripped == "/memory":
             _handle_memory_command()
+            continue
+        if not stripped:
             continue
 
         run_agent(
@@ -170,6 +184,7 @@ def interactive_loop(
 def main() -> None:
     parser = build_cli_parser()
     args = parser.parse_args()
+    _validate_runtime_args(args, parser)
 
     settings.request_delay = args.request_delay
     settings.session_max_messages = args.history_count
@@ -177,7 +192,7 @@ def main() -> None:
 
     set_language(args.lang)
 
-    settings.workspace_dir = Path(args.workdir) if args.workdir else ROOT / "workspace"
+    settings.workspace_dir = Path(args.workdir).expanduser() if args.workdir else ROOT / "workspace"
     console.print(Panel.fit(t("workdir_message", path=settings.workspace_dir), title=t("cli_config_title")))
 
     try:
@@ -209,10 +224,7 @@ def main() -> None:
     session_store = SessionStore(SESSION_FILE, max_messages=settings.session_max_messages)
     if args.reset_session:
         session_store.save([])
-        if RECENT_CONVERSATIONS_PATH.exists():
-            RECENT_CONVERSATIONS_PATH.write_text(
-                t("recent_conversations_header") + "\n\n", encoding="utf-8"
-            )
+        _clear_recent_conversations()
         console.print(t("session_reset_message"))
 
     debug_enabled = bool(model_cfg.get("debug", False))
@@ -220,7 +232,6 @@ def main() -> None:
         console.print(Panel.fit(t("debug_enabled_message"), title=t("debug_config_title")))
 
     recorder = ConversationRecorder(RECENT_CONVERSATIONS_PATH, max_rounds=settings.history_rounds)
-
     model = model_cfg.get("model", "gpt-4o-mini")
 
     if args.task:
