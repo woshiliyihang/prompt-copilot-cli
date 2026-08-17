@@ -20,7 +20,7 @@ from typing import Any
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
+from mcp.client.streamable_http import streamablehttp_client
 from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completion, Completer
@@ -279,7 +279,7 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.6.3"
+APPLICATION_VERSION = "0.6.5"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
