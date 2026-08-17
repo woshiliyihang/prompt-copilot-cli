@@ -278,17 +278,16 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.5.9"
+APPLICATION_VERSION = "0.6.0"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
 DEFAULT_MAX_CHAT_COUNT = 6
-CHAT_MESSAGE_MAX_COUNT = 8
+CHAT_MESSAGE_MAX_COUNT = 12
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
-RE_ACTION_DELAY = 1 # unit: seconds
+RE_ACTION_DELAY = 3 # unit: seconds
 TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 1 hour in seconds
 MODEL_REQUEST_TIMEOUT_SECONDS = 600  # generous timeout for slower model generations
-TASK_DESCRIPTION_TARGET = "[This is the task list after understanding the user's needs]"
 DEFAULT_MODEL_CONFIG: dict[str, Any] = {
     "model": "",
     "base_url": "",
@@ -1590,24 +1589,6 @@ class ConversationRecorder:
         block = f"**Assistant:**\n\n{assistant_text}\n\n"
         self._append(block)
 
-    def record_tool_start(self, tool_name: str, args: Any) -> None:
-        try:
-            args_text = json.dumps(args, ensure_ascii=False)
-        except Exception:
-            args_text = str(args)
-        block = f"**Tool Start:** {tool_name}\n\nArguments: {args_text}\n\n"
-        self._append(block)
-
-    def record_tool_result(self, tool_name: str, result: dict[str, Any]) -> None:
-        status = result.get("status")
-        content = result.get("content")
-        try:
-            content_text = json.dumps(content, ensure_ascii=False)
-        except Exception:
-            content_text = str(content)
-        block = f"**Tool Result:** {tool_name} (status={status})\n\n{content_text}\n\n"
-        self._append(block)
-
     def record_error(self, error_text: str) -> None:
         block = f"**Error:**\n\n{error_text}\n\n"
         self._append(block)
@@ -1688,11 +1669,9 @@ def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]],
 
 ### 请严格按照以下格式输出任务清单：
 
-用户原始指令：......
+我的原始指令：......
 
-结合上下文得到用户的完整意图：.....
-
-接下来按照这个步骤逐步执行完成任务：
+接下来按步骤逐步执行完成任务：
 1、第一步：......
 2、第二步：......
 ......
