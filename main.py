@@ -1817,7 +1817,8 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
         function_content = getattr(assistant_message,"content",None) or ""
         function_reasoning = getattr(assistant_message,"reasoning",None) or ""
         function_content_reasoning = getattr(assistant_message,"content_reasoning",None) or ""
-        final_reasoning = function_reasoning or function_content_reasoning or function_content
+        function_reasoning_content = getattr(assistant_message,"reasoning_content",None) or ""
+        final_reasoning = function_reasoning or function_content_reasoning or function_content or function_reasoning_content
         append_task_memory_entry(
             "### The reason for the assistant to call the function\n\n"
             f"{final_reasoning}\n\n"
