@@ -11,11 +11,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
@@ -522,10 +523,65 @@ TOOL_DEFINITIONS = [
         }
     }
 ]
-ACTIVE_MCP_TOOL_DEFINITIONS: list[dict[str, Any]] = []
-ACTIVE_MCP_TOOL_CONFIG: dict[str, Any] = {}
-ACTIVE_MCP_TOOL_CONFIGS: list[dict[str, Any]] = []
-ACTIVE_MCP_TOOL_SERVER_BY_NAME: dict[str, dict[str, Any]] = {}
+class MCPManager:
+    """Manages MCP tool discovery and execution state."""
+    
+    def __init__(self):
+        self.tool_definitions: list[dict[str, Any]] = []
+        self.tool_config: dict[str, Any] = {}
+        self.tool_configs: list[dict[str, Any]] = []
+        self.server_by_name: dict[str, dict[str, Any]] = {}
+    
+    def set_tools(self, definitions: list[dict[str, Any]], configs: list[dict[str, Any]]) -> None:
+        self.tool_definitions = definitions
+        self.tool_configs = configs
+        self.tool_config = configs[0] if configs else {}
+        self.server_by_name = {}
+        for item in definitions:
+            self.server_by_name[item["function"]["name"]] = configs[definitions.index(item)] if definitions.index(item) < len(configs) else self.tool_config
+    
+    def clear(self) -> None:
+        self.tool_definitions = []
+        self.tool_config = {}
+        self.tool_configs = []
+        self.server_by_name = {}
+    
+    def get_server_config(self, tool_name: str) -> dict[str, Any] | None:
+        return self.server_by_name.get(tool_name) or (self.tool_configs[0] if self.tool_configs else self.tool_config or None)
+
+
+
+# Tool definitions cache
+_cached_tool_definitions: list[dict[str, Any]] | None = None
+_cached_mcp_tool_count: int = 0
+
+def get_tool_definitions() -> list[dict[str, Any]]:
+    """Get cached tool definitions, rebuilding only when MCP tools change."""
+    global _cached_tool_definitions, _cached_mcp_tool_count
+    current_count = len(_mcp_manager.tool_definitions)
+    if _cached_tool_definitions is None or _cached_mcp_tool_count != current_count:
+        _cached_tool_definitions = TOOL_DEFINITIONS + _mcp_manager.tool_definitions
+        _cached_mcp_tool_count = current_count
+    return _cached_tool_definitions
+# Global instance
+_mcp_manager = MCPManager()
+
+# Backward compatibility properties
+@property
+def ACTIVE_MCP_TOOL_DEFINITIONS() -> list[dict[str, Any]]:
+    return _mcp_manager.tool_definitions
+
+@property
+def ACTIVE_MCP_TOOL_CONFIG() -> dict[str, Any]:
+    return _mcp_manager.tool_config
+
+@property
+def ACTIVE_MCP_TOOL_CONFIGS() -> list[dict[str, Any]]:
+    return _mcp_manager.tool_configs
+
+@property
+def ACTIVE_MCP_TOOL_SERVER_BY_NAME() -> dict[str, dict[str, Any]]:
+    return _mcp_manager.server_by_name
 INTERRUPTION_REQUESTED = False
 
 
@@ -711,6 +767,47 @@ def resolve_execution_cwd(cwd: Any, fallback: str | os.PathLike[str] | None = No
     if cwd in (None, "", "."):
         return str(fallback_path)
 
+
+
+def safe_path(path: str | os.PathLike[str], base: Path | None = None) -> Path:
+    """Resolve path and ensure it's within base directory (prevents path traversal)."""
+    # Use WORKSPACE_DIR as default base for relative paths
+    if base is None:
+        try:
+            base_path = WORKSPACE_DIR.resolve()
+        except NameError:
+            base_path = Path.cwd().resolve()
+    else:
+        base_path = base.resolve()
+    
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        # Relative path: resolve against base and verify it's within base
+        target = (base_path / target).resolve()
+        try:
+            target.relative_to(base_path)
+        except ValueError:
+            raise PermissionError(f"Path traversal attempt blocked: {path}")
+    else:
+        # Absolute path: just resolve (normalize) it
+        # Path traversal with absolute paths like /../../../etc/passwd will be normalized by resolve()
+        target = target.resolve()
+    return target
+
+
+def resolve_tool_path(path_arg: str | None, arg_name: str = "path") -> tuple[Path | None, dict | None]:
+    """Safely resolve a path argument for a tool.
+    
+    Returns:
+        (path, None) on success
+        (None, error_dict) on failure
+    """
+    if not path_arg:
+        return None, {"status": "error", "content": t("tool_missing_arg", name="unknown", arg=arg_name)}
+    try:
+        return safe_path(path_arg), None
+    except PermissionError as e:
+        return None, {"status": "error", "content": str(e)}
     candidate = Path(str(cwd)).expanduser()
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
@@ -822,7 +919,7 @@ def get_tool_description(tool_call: Any) -> str:
     if not isinstance(tool_name, str) or not tool_name:
         return ""
 
-    for definition in TOOL_DEFINITIONS + ACTIVE_MCP_TOOL_DEFINITIONS:
+    for definition in TOOL_DEFINITIONS + _mcp_manager.tool_definitions:
         function = definition.get("function") or {}
         if function.get("name") == tool_name:
             return str(function.get("description", "")).strip()
@@ -965,14 +1062,12 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 definitions.extend(discovered)
                 active_configs.append(server_config)
                 for item in discovered:
-                    ACTIVE_MCP_TOOL_SERVER_BY_NAME[item["function"]["name"]] = server_config
+                    _mcp_manager.server_by_name[item["function"]["name"]] = server_config
             except Exception:
                 logger.exception(t("mcp_discover_failed") + f", server={server_config.get('name')}")
                 console.print(Panel.fit(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed")))
 
-        ACTIVE_MCP_TOOL_DEFINITIONS = definitions
-        ACTIVE_MCP_TOOL_CONFIGS = active_configs
-        ACTIVE_MCP_TOOL_CONFIG = active_configs[0] if active_configs else {}
+        _mcp_manager.set_tools(definitions, active_configs)
         logger.info("Discovered MCP tool definitions: %s", [item["function"]["name"] for item in definitions])
         return definitions
     except Exception:
@@ -985,7 +1080,7 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    server_config = ACTIVE_MCP_TOOL_SERVER_BY_NAME.get(name) or ACTIVE_MCP_TOOL_CONFIGS[0] or ACTIVE_MCP_TOOL_CONFIG
+    server_config = _mcp_manager.get_server_config(name)
     if not server_config:
         return {"status": "error", "content": t("mcp_tool_not_found", name=name)}
 
@@ -1036,6 +1131,22 @@ def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout: int | None = None) -> tuple[int, str, str]:
     safe_cwd = resolve_execution_cwd(cwd, Path.cwd())
+    
+    # Validate command to prevent shell injection
+    if shell:
+        if isinstance(command, str):
+            # For shell=True, command must be a string - validate it doesn't contain dangerous patterns
+            dangerous = [';', '&', '|', '`', '$(', '&&', '||']
+            for d in dangerous:
+                if d in command:
+                    logger.warning("Potentially dangerous shell command blocked: %s", command)
+                    raise ValueError(f"Shell command contains forbidden pattern: {d}")
+        else:
+            raise ValueError("When shell=True, command must be a string")
+    else:
+        # For shell=False, command must be a list
+        if isinstance(command, str):
+            raise ValueError("When shell=False, command must be a list")
     
     # 跨平台进程隔离配置
     popen_kwargs = {
@@ -1091,17 +1202,16 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
 
 
 
-import os
-import signal
-import subprocess
-import time
-import platform
-from pathlib import Path
+
 
 
 
 
 def execute_tool_call(tool_call: Any) -> dict[str, Any]:
+    """Execute a tool call and return the result."""
+    # Type check for tool_call
+    if not hasattr(tool_call, 'function'):
+        return {"status": "error", "content": "Invalid tool call object"}
     name = getattr(tool_call.function, "name", "")
     args = safe_parse_tool_args(getattr(tool_call.function, "arguments", {}))
     ensure_not_interrupted()
@@ -1113,9 +1223,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="read_file", arg="path")}
             logger.error("read_file missing path argument, raw args: %s", args)
             return result
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "error", "content": f"File does not exist: {path}"}
             logger.info("read_file result: %s", result)
@@ -1148,9 +1258,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("write_file missing path argument, raw args: %s", args)
             return result
         content = args.get("content", "")
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         result = {"status": "ok", "content": f"Written: {path}"}
@@ -1163,9 +1273,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="delete_file", arg="path")}
             logger.error("delete_file missing path argument, raw args: %s", args)
             return result
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "error", "content": f"File does not exist: {path}"}
             logger.info("delete_file result: %s", result)
@@ -1181,9 +1291,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="create_directory", arg="path")}
             logger.error("create_directory missing path argument, raw args: %s", args)
             return result
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         path.mkdir(parents=True, exist_ok=True)
         result = {"status": "ok", "content": f"Created directory: {path}"}
         logger.info("create_directory result: %s", result)
@@ -1195,9 +1305,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="delete_directory", arg="path")}
             logger.error("delete_directory missing path argument, raw args: %s", args)
             return result
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "error", "content": f"Directory does not exist: {path}"}
             logger.info("delete_directory result: %s", result)
@@ -1214,12 +1324,12 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="rename_path", arg="old_path/new_path")}
             logger.error("rename_path missing arguments, raw args: %s", args)
             return result
-        old = Path(old_path).expanduser()
-        new = Path(new_path).expanduser()
-        if not old.is_absolute():
-            old = Path.cwd() / old
-        if not new.is_absolute():
-            new = Path.cwd() / new
+        old, error = resolve_tool_path(old_path, "old_path")
+        if error:
+            return error
+        new, error = resolve_tool_path(new_path, "new_path")
+        if error:
+            return error
         if not old.exists():
             result = {"status": "error", "content": f"Path does not exist: {old}"}
             logger.info("rename_path result: %s", result)
@@ -1237,12 +1347,12 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="copy_file", arg="source_path/destination_path")}
             logger.error("copy_file missing arguments, raw args: %s", args)
             return result
-        source = Path(source_path).expanduser()
-        destination = Path(destination_path).expanduser()
-        if not source.is_absolute():
-            source = Path.cwd() / source
-        if not destination.is_absolute():
-            destination = Path.cwd() / destination
+        source, error = resolve_tool_path(source_path, "source_path")
+        if error:
+            return error
+        destination, error = resolve_tool_path(destination_path, "destination_path")
+        if error:
+            return error
         if not source.exists():
             result = {"status": "error", "content": f"Source file does not exist: {source}"}
             logger.info("copy_file result: %s", result)
@@ -1259,9 +1369,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="read_image_as_base64", arg="path")}
             logger.error("read_image_as_base64 missing path argument, raw args: %s", args)
             return result
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "error", "content": f"Image file does not exist: {path}"}
             logger.info("read_image_as_base64 result: %s", result)
@@ -1277,9 +1387,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             result = {"status": "error", "content": t("tool_missing_arg", name="list_dir", arg="path")}
             logger.error("list_dir missing path argument, raw args: %s", args)
             return result
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
             logger.info("list_dir result: %s", result)
@@ -1307,9 +1417,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("search_code missing arguments, raw args: %s", args)
             return result
 
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
             logger.info("search_code result: %s", result)
@@ -1360,9 +1470,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("edit_file missing arguments, raw args: %s", args)
             return result
 
-        path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path, error = resolve_tool_path(file_path, "path")
+        if error:
+            return error
         if not path.exists():
             result = {"status": "error", "content": f"File does not exist: {path}"}
             logger.info("edit_file result: %s", result)
@@ -1394,27 +1504,38 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("execute_python_script missing script argument, raw args: %s", args)
             return result
         cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
-        script_path = Path(cwd) / "__cli_temp_script__.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(script, encoding="utf-8")
         
-        # 获取自定义超时，默认 120 秒，最大不超过 360 秒
-        timeout_seconds = int(args.get("timeout_seconds") or 120)
-        timeout_seconds = min(max(timeout_seconds, 10), TOOL_SUBPROCESS_TIMEOUT)
-        
-        returncode, stdout, stderr = run_subprocess_command(
-            [sys.executable, str(script_path)], 
-            cwd, 
-            shell=False, 
-            timeout=timeout_seconds
-        )
-        response = {
-            "status": "ok" if returncode == 0 else "error",
-            "content": stdout + stderr,
-            "returncode": returncode,
-        }
-        logger.info("execute_python_script result: %s", response)
-        return response
+        # Use tempfile to avoid race conditions
+        fd, script_path_str = tempfile.mkstemp(suffix=".py", prefix="cli_script_", dir=cwd)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(script)
+            script_path = Path(script_path_str)
+            
+            # 获取请求超时可配置默认 120 秒、最大 360 秒
+            timeout_seconds = int(args.get("timeout_seconds") or 120)
+            timeout_seconds = min(max(timeout_seconds, 10), TOOL_SUBPROCESS_TIMEOUT)
+            
+            returncode, stdout, stderr = run_subprocess_command(
+                [sys.executable, str(script_path)], 
+                cwd, 
+                shell=False, 
+                timeout=timeout_seconds
+            )
+            response = {
+                "status": "ok" if returncode == 0 else "error",
+                "content": stdout + stderr,
+                "returncode": returncode,
+            }
+            logger.info("execute_python_script result: %s", response)
+            return response
+        finally:
+            # Cleanup temp file
+            try:
+                script_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
 
 
     if name in {item["function"]["name"] for item in ACTIVE_MCP_TOOL_DEFINITIONS}:
@@ -1501,7 +1622,7 @@ def _filter_think_tags(content: str) -> str:
 def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False, disable_tools:bool = False) -> Any:
     ensure_not_interrupted()
     wait_for_model_call_interval()
-    tool_definitions = TOOL_DEFINITIONS + ACTIVE_MCP_TOOL_DEFINITIONS
+    tool_definitions = get_tool_definitions()
     request_payload = None
     if disable_tools:
         request_payload = {
@@ -1579,6 +1700,12 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
             show_stage("Debug - model call error", traceback.format_exc())
         else:
             show_stage(t("model_call_failed", error=user_msg), user_msg)
+        return assistant_message
+    except asyncio.TimeoutError:
+        logger.error("Model call timed out")
+        assistant_message = SimpleNamespace()
+        assistant_message.tool_calls = []
+        assistant_message.content = "Model call timed out. Please try again."
         return assistant_message
     finally:
         mark_model_call_completed()
@@ -1764,9 +1891,11 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
     while True:
         try:
             finalize_prompt = []
-            messages = messages[-CHAT_MESSAGE_MAX_COUNT:]  # Keep only the last N messages for context
-            finalize_prompt.extend(messages)
-            existing_first_prompt = first_task_prompt in messages
+            # Keep system prompt separate, only truncate conversation messages
+            conversation_messages = [m for m in messages if m.get("role") != "system"]
+            conversation_messages = conversation_messages[-CHAT_MESSAGE_MAX_COUNT:]
+            finalize_prompt.extend(conversation_messages)
+            existing_first_prompt = first_task_prompt in conversation_messages
             if not existing_first_prompt:
                 finalize_prompt = [first_task_prompt] + finalize_prompt
             finalize_prompt = [system_prompt_message] + finalize_prompt
@@ -1818,7 +1947,7 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
         function_reasoning = getattr(assistant_message,"reasoning",None) or ""
         function_content_reasoning = getattr(assistant_message,"content_reasoning",None) or ""
         function_reasoning_content = getattr(assistant_message,"reasoning_content",None) or ""
-        final_reasoning = function_reasoning or function_content_reasoning or function_content or function_reasoning_content
+        final_reasoning = function_reasoning.strip() or function_content_reasoning.strip() or function_content.strip() or function_reasoning_content.strip()
         append_task_memory_entry(
             "### The reason for the assistant to call the function\n\n"
             f"{final_reasoning}\n\n"
