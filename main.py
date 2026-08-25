@@ -280,7 +280,7 @@ DEFAULT_SYSTEM_PROMPT = f"""
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.6.7"
+APPLICATION_VERSION = "0.6.8"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
@@ -288,7 +288,7 @@ DEFAULT_MAX_CHAT_COUNT = 6
 CHAT_MESSAGE_MAX_COUNT = 12
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
 RE_ACTION_DELAY = 3 # unit: seconds
-TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 1 hour in seconds
+TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 6 minutes in seconds
 MODEL_REQUEST_TIMEOUT_SECONDS = 600  # generous timeout for slower model generations
 DEFAULT_MODEL_CONFIG: dict[str, Any] = {
     "model": "",
@@ -862,10 +862,8 @@ def ensure_config(workdir: Path) -> tuple[dict[str, Any], str]:
         )
 
     for key, value in file_payload.items():
-        if isinstance(value, dict) and isinstance(DEFAULT_MODEL_CONFIG.get(key), dict):
-            DEFAULT_MODEL_CONFIG[key] = value
-        else:
-            DEFAULT_MODEL_CONFIG[key] = value
+        # Apply loaded config on top of defaults; nested dicts are replaced wholesale.
+        DEFAULT_MODEL_CONFIG[key] = value
 
     required_fields = ["model", "base_url", "api_key"]
     missing_fields = [field for field in required_fields if not str(DEFAULT_MODEL_CONFIG.get(field, "")).strip()]
@@ -1050,16 +1048,18 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         definitions: list[dict[str, Any]] = []
         active_configs: list[dict[str, Any]] = []
-        for server_config in server_configs:
-            try:
-                discovered = asyncio.run(_discover_one(server_config))
-                definitions.extend(discovered)
-                active_configs.append(server_config)
-                for item in discovered:
-                    _mcp_manager.server_by_name[item["function"]["name"]] = server_config
-            except Exception:
-                logger.exception(t("mcp_discover_failed") + f", server={server_config.get('name')}")
-                console.print(Panel.fit(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed")))
+        async def _discover_all() -> None:
+            for server_config in server_configs:
+                try:
+                    discovered = await _discover_one(server_config)
+                    definitions.extend(discovered)
+                    active_configs.append(server_config)
+                    for item in discovered:
+                        _mcp_manager.server_by_name[item["function"]["name"]] = server_config
+                except Exception:
+                    logger.exception(t("mcp_discover_failed") + f", server={server_config.get('name')}")
+                    console.print(Panel.fit(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed")))
+        asyncio.run(_discover_all())
 
         _mcp_manager.set_tools(definitions, active_configs)
         logger.info("Discovered MCP tool definitions: %s", [item["function"]["name"] for item in definitions])
@@ -1146,6 +1146,8 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
         proc = subprocess.Popen(command, shell=shell, **popen_kwargs)
     except (FileNotFoundError, NotADirectoryError, OSError) as exc:
         logger.warning(t("tool_subprocess_failed"), cwd, safe_cwd, exc)
+        # Remove any cwd already present in popen_kwargs to avoid duplicate keyword.
+        popen_kwargs.pop("cwd", None)
         proc = subprocess.Popen(command, cwd=str(Path.cwd()), shell=shell, **popen_kwargs)
 
     try:
@@ -1653,6 +1655,12 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
         logger.info("Model call interrupted by user")
         show_stage(t("cancelled"), t("model_cancelled"))
         raise
+    except asyncio.TimeoutError:
+        logger.error("Model call timed out")
+        assistant_message = SimpleNamespace()
+        assistant_message.tool_calls = []
+        assistant_message.content = "Model call timed out. Please try again."
+        return assistant_message
     except Exception as exc:
         logger.exception(t("model_error"))
         err_text = str(exc)
@@ -1673,12 +1681,6 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
             show_stage("Debug - model call error", traceback.format_exc())
         else:
             show_stage(t("model_call_failed", error=user_msg), user_msg)
-        return assistant_message
-    except asyncio.TimeoutError:
-        logger.error("Model call timed out")
-        assistant_message = SimpleNamespace()
-        assistant_message.tool_calls = []
-        assistant_message.content = "Model call timed out. Please try again."
         return assistant_message
     finally:
         mark_model_call_completed()
@@ -2102,9 +2104,13 @@ def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_pr
         logger.exception(t("task_end_generation_failed_log"))
         console.print(Panel.fit(traceback.format_exc(), title=t("task_end_generate_failed")))
         return
-    prompt_call_tools = get_content_from_tool_calls(assistant_message.tool_calls)
+    if assistant_message is None:
+        console.print(Panel.fit(t("task_end_no_prompt"), title=t("task_end_result")))
+        return
+    # Tools are disabled for this call, so tool_calls is expected to be empty.
+    prompt_call_tools = get_content_from_tool_calls(getattr(assistant_message, "tool_calls", None))
     # console.print(f"{prompt_call_tools}")
-    final_prompt = (assistant_message.content or "").strip()
+    final_prompt = ((assistant_message.content or "").strip() if hasattr(assistant_message, "content") else "")
     if not final_prompt:
         final_prompt = prompt_call_tools
     if not final_prompt:
