@@ -198,8 +198,8 @@ TRANSLATIONS = {
     "tool_execution": {"zh": "开始执行工具：{name}，参数：{args}", "en": "Starting tool execution: {name}, args: {args}"},
     "tool_subprocess_failed": {"zh": "子进程启动失败，cwd=%s，回退到 %s: %s", "en": "Failed to start subprocess in cwd=%s, falling back to %s: %s"},
     "welcome_message": {
-        "zh": "输入:\n/exit 退出，\n/clear 清空本地会话，\n/task-start 开始任务上下文，\n/task-end 生成最终提示。\nCtrl+C 可中断当前执行。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\npython main.py --reset-session\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-amc / --agent-messages-count：历史消息数量(推荐默认)\n-rd / --request-delay：请求间隔秒数(推荐默认)\n-hc / --history-count：会话轮次数量(推荐默认)\n--reset-session：重置本地会话记录。",
-        "en": "Input:\n/exit to exit,\n/clear to clear the local session,\n/task-start to start a task context,\n/task-end to generate the final prompt.\nCtrl+C can interrupt the current execution.\n\nStartup command examples:\npython main.py -l zh\npython main.py -t \"your task\" -d ./workspace -l en\npython main.py --reset-session\n\nOptions:\n-t / --task: one-off task content\n-d / --workdir: specify the working directory\n-l / --lang: choose language (zh / en)\n-amc / --agent-messages-count: number of messages to keep in agent history (default: 6)\n-rd / --request-delay: delay in seconds between model requests (default: 8)\n-hc / --history-count: number of rounds to keep in conversation history (default: 5)\n--reset-session: reset the local session history."
+        "zh": "输入:\n/exit 退出，\n/clear 清空本地会话，\n/task-start 开始任务上下文，\n/task-end 生成最终提示。\nCtrl+C 可中断当前执行。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\npython main.py --reset-session\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-amc / --agent-messages-count：历史消息数量(默认: 12)\n-rd / --request-delay：请求间隔秒数(默认: 3)\n-hc / --history-count：会话轮次数量(默认: 6)\n--reset-session：重置本地会话记录。",
+        "en": "Input:\n/exit to exit,\n/clear to clear the local session,\n/task-start to start a task context,\n/task-end to generate the final prompt.\nCtrl+C can interrupt the current execution.\n\nStartup command examples:\npython main.py -l zh\npython main.py -t \"your task\" -d ./workspace -l en\npython main.py --reset-session\n\nOptions:\n-t / --task: one-off task content\n-d / --workdir: specify the working directory\n-l / --lang: choose language (zh / en)\n-amc / --agent-messages-count: number of messages to keep in agent history (default: 12)\n-rd / --request-delay: delay in seconds between model requests (default: 3)\n-hc / --history-count: number of rounds to keep in conversation history (default: 6)\n--reset-session: reset the local session history."
     },
     "startup_title": {"zh": "启动", "en": "Start"},
     "exit_message": {"zh": "已退出。", "en": "Exited."},
@@ -537,8 +537,8 @@ class MCPManager:
         self.tool_configs = configs
         self.tool_config = configs[0] if configs else {}
         self.server_by_name = {}
-        for item in definitions:
-            self.server_by_name[item["function"]["name"]] = configs[definitions.index(item)] if definitions.index(item) < len(configs) else self.tool_config
+        for idx, item in enumerate(definitions):
+            self.server_by_name[item["function"]["name"]] = configs[idx] if idx < len(configs) else self.tool_config
     
     def clear(self) -> None:
         self.tool_definitions = []
@@ -548,7 +548,6 @@ class MCPManager:
     
     def get_server_config(self, tool_name: str) -> dict[str, Any] | None:
         return self.server_by_name.get(tool_name) or (self.tool_configs[0] if self.tool_configs else self.tool_config or None)
-
 
 
 # Tool definitions cache
@@ -566,20 +565,16 @@ def get_tool_definitions() -> list[dict[str, Any]]:
 # Global instance
 _mcp_manager = MCPManager()
 
-# Backward compatibility properties
-@property
+# Backward compatibility accessors (module-level functions, not @property)
 def ACTIVE_MCP_TOOL_DEFINITIONS() -> list[dict[str, Any]]:
     return _mcp_manager.tool_definitions
 
-@property
 def ACTIVE_MCP_TOOL_CONFIG() -> dict[str, Any]:
     return _mcp_manager.tool_config
 
-@property
 def ACTIVE_MCP_TOOL_CONFIGS() -> list[dict[str, Any]]:
     return _mcp_manager.tool_configs
 
-@property
 def ACTIVE_MCP_TOOL_SERVER_BY_NAME() -> dict[str, dict[str, Any]]:
     return _mcp_manager.server_by_name
 INTERRUPTION_REQUESTED = False
@@ -760,13 +755,33 @@ def build_multimodal_user_message(
     }
 
 
-
-
 def resolve_execution_cwd(cwd: Any, fallback: str | os.PathLike[str] | None = None) -> str:
+    """Resolve the working directory for subprocess execution.
+    
+    Returns a valid directory path, creating it if needed.
+    Falls back to the fallback path (default: cwd) if resolution fails.
+    """
     fallback_path = Path(fallback or Path.cwd()).expanduser()
     if cwd in (None, "", "."):
         return str(fallback_path)
 
+    candidate = Path(str(cwd)).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return str(fallback_path)
+
+    if resolved.exists() and resolved.is_dir():
+        return str(resolved)
+
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+    except Exception:
+        return str(fallback_path)
 
 
 def safe_path(path: str | os.PathLike[str], base: Path | None = None) -> Path:
@@ -789,8 +804,10 @@ def safe_path(path: str | os.PathLike[str], base: Path | None = None) -> Path:
         except ValueError:
             raise PermissionError(f"Path traversal attempt blocked: {path}")
     else:
-        # Absolute path: just resolve (normalize) it
-        # Path traversal with absolute paths like /../../../etc/passwd will be normalized by resolve()
+        # Absolute path: resolve (normalize) it.
+        # Path traversal via absolute paths like /../../../etc/passwd
+        # is already mitigated by resolve() which normalizes the path.
+        # OS-level permissions enforce access control.
         target = target.resolve()
     return target
 
@@ -808,23 +825,6 @@ def resolve_tool_path(path_arg: str | None, arg_name: str = "path") -> tuple[Pat
         return safe_path(path_arg), None
     except PermissionError as e:
         return None, {"status": "error", "content": str(e)}
-    candidate = Path(str(cwd)).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-
-    try:
-        resolved = candidate.resolve(strict=False)
-    except Exception:
-        return str(fallback_path)
-
-    if resolved.exists() and resolved.is_dir():
-        return str(resolved)
-
-    try:
-        resolved.mkdir(parents=True, exist_ok=True)
-        return str(resolved)
-    except Exception:
-        return str(fallback_path)
 
 
 def _format_config_field_help() -> str:
@@ -888,7 +888,11 @@ def build_client(model_cfg: dict[str, Any]) -> OpenAI:
     kwargs: dict[str, Any] = {"api_key": api_key}
     if base_url:
         kwargs["base_url"] = base_url
-    kwargs["timeout"] = MODEL_REQUEST_TIMEOUT_SECONDS
+    try:
+        from httpx import Timeout as HttpxTimeout
+        kwargs["timeout"] = HttpxTimeout(MODEL_REQUEST_TIMEOUT_SECONDS)
+    except ImportError:
+        kwargs["timeout"] = MODEL_REQUEST_TIMEOUT_SECONDS
     return OpenAI(**kwargs)
 
 
@@ -1019,7 +1023,6 @@ def normalize_mcp_server_configs(mcp_cfg: Any) -> list[dict[str, Any]]:
 
 
 def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    global ACTIVE_MCP_TOOL_DEFINITIONS, ACTIVE_MCP_TOOL_CONFIG, ACTIVE_MCP_TOOL_CONFIGS, ACTIVE_MCP_TOOL_SERVER_BY_NAME
 
     mcp_cfg = model_cfg.get("mcp", {})
     if isinstance(mcp_cfg, dict):
@@ -1027,24 +1030,15 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     else:
         enabled = True
     if not enabled:
-        ACTIVE_MCP_TOOL_DEFINITIONS = []
-        ACTIVE_MCP_TOOL_CONFIG = {}
-        ACTIVE_MCP_TOOL_CONFIGS = []
-        ACTIVE_MCP_TOOL_SERVER_BY_NAME = {}
+        _mcp_manager.clear()
         return []
 
     server_configs = normalize_mcp_server_configs(mcp_cfg)
     if not server_configs:
-        ACTIVE_MCP_TOOL_DEFINITIONS = []
-        ACTIVE_MCP_TOOL_CONFIG = {}
-        ACTIVE_MCP_TOOL_CONFIGS = []
-        ACTIVE_MCP_TOOL_SERVER_BY_NAME = {}
+        _mcp_manager.clear()
         return []
 
-    ACTIVE_MCP_TOOL_CONFIGS = []
-    ACTIVE_MCP_TOOL_CONFIG = {}
-    ACTIVE_MCP_TOOL_SERVER_BY_NAME = {}
-    ACTIVE_MCP_TOOL_DEFINITIONS = []
+    # Initialize via _mcp_manager
 
     async def _discover_one(server_config: dict[str, Any]) -> list[dict[str, Any]]:
         async def _handler(session: ClientSession) -> list[dict[str, Any]]:
@@ -1072,10 +1066,7 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
         return definitions
     except Exception:
         logger.exception(t("mcp_discover_failed"))
-        ACTIVE_MCP_TOOL_DEFINITIONS = []
-        ACTIVE_MCP_TOOL_CONFIG = {}
-        ACTIVE_MCP_TOOL_CONFIGS = []
-        ACTIVE_MCP_TOOL_SERVER_BY_NAME = {}
+        _mcp_manager.clear()
         return []
 
 
@@ -1115,18 +1106,6 @@ def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.exception(t("mcp_tool_failed") + f", tool={name}")
         return {"status": "error", "content": traceback.format_exc()}
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout: int | None = None) -> tuple[int, str, str]:
@@ -1185,7 +1164,7 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
             pass
         finally:
             try: proc.kill()
-            except: pass
+            except Exception: pass
         return -1, "", f"Command timed out after {timeout} seconds"
     except KeyboardInterrupt:
         # 处理用户 Ctrl+C 中断
@@ -1199,12 +1178,6 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
         raise
 
     return proc.returncode, stdout or "", stderr or ""
-
-
-
-
-
-
 
 
 def execute_tool_call(tool_call: Any) -> dict[str, Any]:
@@ -1506,6 +1479,7 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
         cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
         
         # Use tempfile to avoid race conditions
+        script_path = None
         fd, script_path_str = tempfile.mkstemp(suffix=".py", prefix="cli_script_", dir=cwd)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1535,7 +1509,6 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
                 script_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
 
 
     if name in {item["function"]["name"] for item in ACTIVE_MCP_TOOL_DEFINITIONS}:
@@ -1888,7 +1861,10 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
     messages = []
     messages.extend(history)
 
-    while True:
+    MAX_AGENT_ITERATIONS = 50
+    _agent_iteration = 0
+    while _agent_iteration < MAX_AGENT_ITERATIONS:
+        _agent_iteration += 1
         try:
             finalize_prompt = []
             # Keep system prompt separate, only truncate conversation messages
@@ -2056,7 +2032,6 @@ def get_content_from_tool_calls(tool_calls: List) -> str:
     return ""
 
 
-
 def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_prompt: str, workdir: Path, debug_enabled: bool = False) -> None:
     """Process recent_conversations.md to find the most recent /task-start and use the
     subsequent rounds to ask the model to produce an improved prompt, then write last-prompt.md.
@@ -2188,9 +2163,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("-t", "--task", help=t("task_argument_help"))
     parser.add_argument("-d", "--workdir", default=WORKSPACE_DIR, help=t("workdir_argument_help"))
     parser.add_argument("-l", "--lang", default="en", help="language code for localization (default: en)")
-    parser.add_argument("-amc", "--agent-messages-count", default=CHAT_MESSAGE_MAX_COUNT, help="number of messages to keep in agent history (default: 6)")
-    parser.add_argument("-rd", "--request-delay", default=RE_ACTION_DELAY, help="delay in seconds between model requests (default: 8)")
-    parser.add_argument("-hc", "--history-count", default=DEFAULT_MAX_CHAT_COUNT, help="number of rounds to keep in conversation history (default: 5)")
+    parser.add_argument("-amc", "--agent-messages-count", default=CHAT_MESSAGE_MAX_COUNT, help=f"number of messages to keep in agent history (default: {CHAT_MESSAGE_MAX_COUNT})")
+    parser.add_argument("-rd", "--request-delay", default=RE_ACTION_DELAY, help=f"delay in seconds between model requests (default: {RE_ACTION_DELAY})")
+    parser.add_argument("-hc", "--history-count", default=DEFAULT_MAX_CHAT_COUNT, help=f"number of rounds to keep in conversation history (default: {DEFAULT_MAX_CHAT_COUNT})")
     parser.add_argument("--reset-session", action="store_true", help=t("reset_session_help"))
     return parser
 
