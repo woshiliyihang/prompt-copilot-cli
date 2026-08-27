@@ -271,17 +271,18 @@ DEFAULT_SYSTEM_PROMPT = f"""
 9、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
 10、如果用户想“查看图片内容”，应优先调用图片读取工具。
 11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时执行每个步骤的时候明确说明当前环节与进度，实时反馈任务状态。
-12、使用 execute_python_script 时必须在脚本内自行管理进程生命周期：若是 ls、pytest、build 等短命令用 subprocess.run 显式设置 timeout，若是 npm run dev、flask run 等常驻服务用 subprocess.Popen 脱离终端启动并在脚本内轮询健康检查 URL，确认就绪后打印 PID 并立即 sys.exit() 退出以防触发 360 秒强制超时。
+12、使用 execute_python_script 时按命令类型区分处理：若是 ls、pytest、build 等短命令，脚本内用 subprocess.run 显式设置 timeout 同步执行即可；若是 npm run dev、flask run 等常驻服务或任何不会自行退出的进程，一律使用 background=true 参数（见第 15 条）让工具脱离终端后台启动并立即返回 PID 与日志路径，脚本内只负责启动后打印就绪标志即可，严禁在脚本内同步阻塞或自行 Popen 后 sys.exit() 模拟后台。
 13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
-14、脱离终端启动常驻服务时务必兼顾跨平台兼容：Linux/Mac 环境设置 start_new_session=True，Windows 环境设置 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP。
-15、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），严禁在脚本内同步阻塞，必须用 subprocess.Popen 跨平台脱离终端启动并将进度心跳写入本地日志文件，打印 PID 后立即 sys.exit()，工具 timeout_seconds 设为 15 秒仅验证启动；后续须通过检查日志监控进度，若发现任务完成或长时间无心跳更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
-16、如果需要搜索互联网信息时候优先使用中国国内搜索引擎优先，例如：bing、百度等。
-17、所有生成的代码及网络检索内容均统一优先使用 UTF-8 编码。
+14、常驻/长驻进程一律通过 execute_python_script 的 background=true 启动（工具内部已按平台脱离终端：Linux/Mac 用 start_new_session=True，Windows 用 creationflags=CREATE_NEW_PROCESS_GROUP），无需在脚本内自行 Popen；仅当你确需在脚本内手动脱离终端启动子进程时，才需自行设置上述跨平台参数。
+15、启动网络服务/服务器（如 web server、npm run dev、flask run 等长驻进程）时，优先使用 execute_python_script 的 background=true 参数：让工具以 detached 方式启动并立即返回 PID 与日志路径，你随后读取日志文件确认启动就绪（如出现端口监听、监听地址、健康检查通过等标志），或访问健康检查 URL 验证，再继续下一步；不要在脚本内同步阻塞等待服务退出。
+16、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），一律使用 background=true 让工具后台启动并立即返回 PID 与日志路径，禁止在脚本内同步阻塞等待完成；随后通过读取日志文件监控进度（脚本内应定期写入心跳/进度），若发现任务完成或长时间无进度更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
+17、如果需要搜索互联网信息时候优先使用中国国内搜索引擎优先，例如：bing、百度等。
+18、所有生成的代码及网络检索内容均统一优先使用 UTF-8 编码。
 
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.6.8"
+APPLICATION_VERSION = "0.6.9"
 WORKSPACE_DIR = ROOT / "workspace"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "agent_runtime.log"
@@ -516,7 +517,15 @@ TOOL_DEFINITIONS = [
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Maximum execution time in seconds before the process is terminated. Defaults to 120. Set a shorter timeout for quick commands to avoid waiting."
+                        "description": "Maximum execution time in seconds before the process is terminated. Defaults to 120. Set a shorter timeout for quick commands to avoid waiting. Ignored when background=true."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "If true, start a long-running service (e.g. web server) detached in the background, return immediately with its PID and log path, and let it keep running. Use this for servers/daemons. Defaults to false (foreground, waits for exit)."
+                    },
+                    "startup_timeout": {
+                        "type": "integer",
+                        "description": "Seconds to probe for a quick startup crash when background=true. Defaults to 3."
                     }
                 },
                 "required": ["script", "cwd"]
@@ -1183,6 +1192,115 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
     return proc.returncode, stdout or "", stderr or ""
 
 
+def run_subprocess_background(
+    command: Any,
+    cwd: str,
+    shell: bool = False,
+    startup_timeout: int = 3,
+    log_dir: str | None = None,
+) -> dict[str, Any]:
+    """Start a long-running (service) process detached in the background.
+
+    Output is redirected to a log file instead of a PIPE. Redirecting to a file
+    (rather than subprocess.PIPE) is essential: if a child process inherits the
+    stdout/stderr pipe descriptors, communicate() would block forever waiting for
+    EOF, which is what used to hang the agent on long-running servers.
+
+    Returns immediately with the PID and log path, after a short startup probe to
+    detect quick crashes (e.g. port already in use).
+    """
+    safe_cwd = resolve_execution_cwd(cwd, Path.cwd())
+
+    if shell:
+        if not isinstance(command, str):
+            raise ValueError("When shell=True, command must be a string")
+    elif isinstance(command, str):
+        raise ValueError("When shell=False, command must be a list")
+
+    log_base = Path(log_dir) if log_dir else Path(safe_cwd)
+    try:
+        log_base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        log_base = Path.cwd()
+    log_path = log_base / f"cli_bg_{int(time.time())}.log"
+    log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+
+    popen_kwargs = {
+        "cwd": safe_cwd,
+        "stdout": log_file,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if platform.system() == "Windows":
+        # Detach from the agent's console so Ctrl+C on the agent does not kill it.
+        popen_kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        proc = subprocess.Popen(command, shell=shell, **popen_kwargs)
+    except Exception as exc:
+        log_file.close()
+        logger.warning("background start failed: %s", exc)
+        return {
+            "status": "error",
+            "content": f"Failed to start background process: {exc}",
+        }
+
+    # Quick-crash probe: if the process exits within startup_timeout seconds,
+    # capture whatever it wrote to the log and report it back to the model.
+    startup_lines: list[str] = []
+    deadline = time.monotonic() + max(startup_timeout, 1)
+    while time.monotonic() < deadline:
+        code = proc.poll()
+        if code is not None:
+            break
+        time.sleep(0.2)
+    code = proc.poll()
+    if code is not None:
+        # Process exited during the probe window (quick crash / port conflict).
+        try:
+            log_file.flush()
+        except Exception:
+            pass
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
+                startup_lines = lf.read().splitlines()[-40:]
+        except Exception:
+            startup_lines = []
+        log_file.close()
+        snippet = "\n".join(startup_lines) or "(no output)"
+        return {
+            "status": "error",
+            "content": (
+                f"Background process exited early (returncode={code}) within "
+                f"{startup_timeout}s. Check the log: {log_path}\nLast output:\n{snippet}"
+            ),
+            "returncode": code,
+            "log_path": str(log_path),
+        }
+
+    # Keep the file handle open so the log keeps capturing output.
+    logger.info("Background process started pid=%s log=%s", proc.pid, log_path)
+    return {
+        "status": "running",
+        "pid": proc.pid,
+        "log_path": str(log_path),
+        "content": (
+            f"Service started in the background. PID={proc.pid}. "
+            f"Log file: {log_path}. "
+            "It will keep running after this tool returns. Monitor readiness by "
+            "reading the log file or hitting its health-check endpoint; stop it "
+            "later with the appropriate kill command if needed."
+        ),
+    }
+
+
 def execute_tool_call(tool_call: Any) -> dict[str, Any]:
     """Execute a tool call and return the result."""
     # Type check for tool_call
@@ -1480,6 +1598,9 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             logger.error("execute_python_script missing script argument, raw args: %s", args)
             return result
         cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
+
+        # Long-running service mode: start detached and return immediately.
+        background = bool(args.get("background") or args.get("wait") is False)
         
         # Use tempfile to avoid race conditions
         script_path = None
@@ -1490,6 +1611,19 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
             script_path = Path(script_path_str)
             
             # 获取请求超时可配置默认 120 秒、最大 360 秒
+            if background:
+                # Long-running service: start detached, return immediately with PID/log.
+                response = run_subprocess_background(
+                    [sys.executable, str(script_path)],
+                    cwd,
+                    shell=False,
+                    startup_timeout=int(args.get("startup_timeout") or 3),
+                    log_dir=cwd,
+                )
+                logger.info("execute_python_script(background) result: %s", response)
+                return response
+
+            # Foreground / short command: get the timeout, default 120s, capped at 360s.
             timeout_seconds = int(args.get("timeout_seconds") or 120)
             timeout_seconds = min(max(timeout_seconds, 10), TOOL_SUBPROCESS_TIMEOUT)
             
