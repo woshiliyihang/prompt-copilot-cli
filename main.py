@@ -2,34 +2,37 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import base64
 import json
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List
+from types import SimpleNamespace
+from typing import Any, Callable
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completion, Completer
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.panel import Panel
-from types import SimpleNamespace
-import re
 
 
 ROOT = Path.home() / ".prompt-copilot"
@@ -129,7 +132,7 @@ def summarize_tool_result(result: Any) -> str:
             for k, v in result.items()
             if k not in {"status", "content"}
         ]
-        extra_text = f" | {", ".join(extra_items)}" if extra_items else ""
+        extra_text = f" | {', '.join(extra_items)}" if extra_items else ""
         return f"status={status}{extra_text}\nContent: {content_summary}"
     return summarize_memory_value(result)
 
@@ -198,8 +201,8 @@ TRANSLATIONS = {
     "tool_execution": {"zh": "开始执行工具：{name}，参数：{args}", "en": "Starting tool execution: {name}, args: {args}"},
     "tool_subprocess_failed": {"zh": "子进程启动失败，cwd=%s，回退到 %s: %s", "en": "Failed to start subprocess in cwd=%s, falling back to %s: %s"},
     "welcome_message": {
-        "zh": "输入:\n/exit 退出，\n/clear 清空本地会话，\n/task-start 开始任务上下文，\n/task-end 生成最终提示。\nCtrl+C 可中断当前执行。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\npython main.py --reset-session\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-amc / --agent-messages-count：历史消息数量(默认: 12)\n-rd / --request-delay：请求间隔秒数(默认: 3)\n-hc / --history-count：会话轮次数量(默认: 6)\n--reset-session：重置本地会话记录。",
-        "en": "Input:\n/exit to exit,\n/clear to clear the local session,\n/task-start to start a task context,\n/task-end to generate the final prompt.\nCtrl+C can interrupt the current execution.\n\nStartup command examples:\npython main.py -l zh\npython main.py -t \"your task\" -d ./workspace -l en\npython main.py --reset-session\n\nOptions:\n-t / --task: one-off task content\n-d / --workdir: specify the working directory\n-l / --lang: choose language (zh / en)\n-amc / --agent-messages-count: number of messages to keep in agent history (default: 12)\n-rd / --request-delay: delay in seconds between model requests (default: 3)\n-hc / --history-count: number of rounds to keep in conversation history (default: 6)\n--reset-session: reset the local session history."
+        "zh": "输入:\n/exit 退出，\n/clear 清空本地会话，\n/task-start 开始任务上下文，\n/task-end 生成最终提示。\nCtrl+C 可中断当前执行（提示符下再按一次退出）。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\npython main.py --reset-session\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-amc / --agent-messages-count：历史消息数量(默认: 12)\n-rd / --request-delay：请求间隔秒数(默认: 3)\n-hc / --history-count：会话轮次数量(默认: 6)\n-np / --no-plan：跳过执行前的任务规划\n--reset-session：重置本地会话记录。",
+        "en": "Input:\n/exit to exit,\n/clear to clear the local session,\n/task-start to start a task context,\n/task-end to generate the final prompt.\nCtrl+C can interrupt the current execution (press it twice at the prompt to exit).\n\nStartup command examples:\npython main.py -l zh\npython main.py -t \"your task\" -d ./workspace -l en\npython main.py --reset-session\n\nOptions:\n-t / --task: one-off task content\n-d / --workdir: specify the working directory\n-l / --lang: choose language (zh / en)\n-amc / --agent-messages-count: number of messages to keep in agent history (default: 12)\n-rd / --request-delay: delay in seconds between model requests (default: 3)\n-hc / --history-count: number of rounds to keep in conversation history (default: 6)\n-np / --no-plan: skip the planning step before executing a request\n--reset-session: reset the local session history."
     },
     "startup_title": {"zh": "启动", "en": "Start"},
     "exit_message": {"zh": "已退出。", "en": "Exited."},
@@ -234,6 +237,8 @@ TRANSLATIONS = {
     "reset_session_help": {"zh": "重置本地持久化会话记录。", "en": "Reset local persisted session history."},
     "prompt_placeholder": {"zh": "你想让我做什么？> ", "en": "What do you want me to do? > "},
     "toolbar_help": {"zh": "可用命令: /exit /clear /task-start /task-end  | Tab 补全 | Ctrl+C 可中断当前执行", "en": "Available commands: /exit /clear /task-start /task-end | Tab completion | Ctrl+C can interrupt the current execution"},
+    "ctrl_c_hint": {"zh": "已清空当前输入；再按一次 Ctrl+C 退出。", "en": "Current input cleared; press Ctrl+C again to exit."},
+    "no_plan_help": {"zh": "跳过执行前的任务规划步骤。", "en": "Skip the planning step before executing a user request."},
     "token_usage_label": {"zh": "累计 token", "en": "Cumulative tokens"},
     "prompt_tokens_label": {"zh": "prompt", "en": "prompt"},
     "completion_tokens_label": {"zh": "completion", "en": "completion"},
@@ -291,6 +296,18 @@ CHAT_MESSAGE_MAX_COUNT = 12
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
 RE_ACTION_DELAY = 3 # unit: seconds
 TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 6 minutes in seconds
+MAX_AGENT_ITERATIONS = 50
+PLANNING_MIN_INPUT_LENGTH = 16  # skip the planning call for very short/simple inputs
+MAX_READ_FILE_BYTES = 5 * 1024 * 1024  # refuse to read files larger than 5 MB
+MAX_READ_FILE_CHARS = 100_000  # truncate longer text before it enters the context
+MAX_SEARCH_FILE_BYTES = 1_000_000  # skip files larger than 1 MB when searching
+MAX_LIST_DIR_ENTRIES = 2000  # cap recursive directory listings
+IGNORED_DIR_NAMES = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv", ".idea",
+    ".vscode", "dist", "build", ".mypy_cache", ".pytest_cache",
+}
+MCP_SESSION_START_TIMEOUT = 120  # generous budget for slow npx cold starts
+MCP_TOOL_CALL_TIMEOUT = 300  # per tool invocation timeout
 MODEL_REQUEST_TIMEOUT_SECONDS = 600  # generous timeout for slower model generations
 DEFAULT_MODEL_CONFIG: dict[str, Any] = {
     "model": "",
@@ -316,14 +333,16 @@ DEFAULT_MODEL_CONFIG: dict[str, Any] = {
 }
 
 
-CONFIG_FIELD_DESCRIPTIONS = {
-    "model": t("config_field_model"),
-    "base_url": t("config_field_base_url"),
-    "api_key": t("config_field_api_key"),
-    "temperature": t("config_field_temperature"),
-    "debug": t("config_field_debug"),
-    "mcp": t("config_field_mcp"),
-}
+def _get_config_field_descriptions() -> dict[str, str]:
+    """Build config field descriptions lazily so they honour the UI language."""
+    return {
+        "model": t("config_field_model"),
+        "base_url": t("config_field_base_url"),
+        "api_key": t("config_field_api_key"),
+        "temperature": t("config_field_temperature"),
+        "debug": t("config_field_debug"),
+        "mcp": t("config_field_mcp"),
+    }
 
 console = Console()
 
@@ -335,7 +354,18 @@ if not logger.handlers:
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(file_handler)
-TOOL_DEFINITIONS = [
+
+_builtin_tool_definitions_cache: list[dict[str, Any]] | None = None
+
+
+def get_builtin_tool_definitions() -> list[dict[str, Any]]:
+    """Build built-in tool definitions lazily so descriptions honour the UI language."""
+    global _builtin_tool_definitions_cache
+    if _builtin_tool_definitions_cache is None:
+        # NOTE: the big literal below intentionally keeps its original indentation;
+        # it is a bracket continuation inside this function, which is valid Python
+        # and lets the t() descriptions be resolved with the runtime UI language.
+        _builtin_tool_definitions_cache = [
     {
         "type": "function",
         "function": {
@@ -533,6 +563,16 @@ TOOL_DEFINITIONS = [
         }
     }
 ]
+    return _builtin_tool_definitions_cache
+
+
+def __getattr__(name: str) -> Any:
+    # Backwards compatibility: keep `main.TOOL_DEFINITIONS` working after the lazy refactor.
+    if name == "TOOL_DEFINITIONS":
+        return get_builtin_tool_definitions()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 class MCPManager:
     """Manages MCP tool discovery and execution state."""
     
@@ -569,7 +609,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
     global _cached_tool_definitions, _cached_mcp_tool_count
     current_count = len(_mcp_manager.tool_definitions)
     if _cached_tool_definitions is None or _cached_mcp_tool_count != current_count:
-        _cached_tool_definitions = TOOL_DEFINITIONS + _mcp_manager.tool_definitions
+        _cached_tool_definitions = get_builtin_tool_definitions() + _mcp_manager.tool_definitions
         _cached_mcp_tool_count = current_count
     return _cached_tool_definitions
 # Global instance
@@ -666,7 +706,7 @@ def get_version_from_command(command: list[str]) -> str:
 
 def build_device_environment_context(workdir: str) -> str:
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    os_name = platform.system() or t("unknown") if False else platform.system() or 'Unknown'
+    os_name = platform.system() or 'Unknown'
     os_release = platform.release() or 'Unknown'
     os_version = platform.version() or 'Unknown'
     os_arch = platform.machine() or 'Unknown'
@@ -837,9 +877,43 @@ def resolve_tool_path(path_arg: str | None, arg_name: str = "path") -> tuple[Pat
         return None, {"status": "error", "content": str(e)}
 
 
+def read_text_with_fallback(path: Path) -> tuple[str, str]:
+    """Read a text file as UTF-8, falling back to GBK/Latin-1 for legacy encodings.
+
+    Returns a (content, encoding_used) tuple.
+    """
+    try:
+        return path.read_text(encoding="utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    for encoding in ("gbk", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("utf-8", b"", 0, 0, "unable to decode file with any supported encoding")
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    """Write to a temp file in the same directory, then atomically replace the target.
+
+    Prevents files from being left half-written if the process dies mid-write.
+    """
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{int(time.time() * 1000)}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 def _format_config_field_help() -> str:
     lines = [t("config_header")]
-    for field_name, description in CONFIG_FIELD_DESCRIPTIONS.items():
+    for field_name, description in _get_config_field_descriptions().items():
         lines.append(f"- {field_name}: {description}")
     return "\n".join(lines)
 
@@ -871,12 +945,13 @@ def ensure_config(workdir: Path) -> tuple[dict[str, Any], str]:
             + f"{_format_config_field_help()}"
         )
 
+    merged_config: dict[str, Any] = dict(DEFAULT_MODEL_CONFIG)
     for key, value in file_payload.items():
         # Apply loaded config on top of defaults; nested dicts are replaced wholesale.
-        DEFAULT_MODEL_CONFIG[key] = value
+        merged_config[key] = value
 
     required_fields = ["model", "base_url", "api_key"]
-    missing_fields = [field for field in required_fields if not str(DEFAULT_MODEL_CONFIG.get(field, "")).strip()]
+    missing_fields = [field for field in required_fields if not str(merged_config.get(field, "")).strip()]
     if missing_fields:
         raise RuntimeError(
             t("config_incomplete", path=CONFIG_SAVE_FILE_PATH, fields=', '.join(missing_fields)) + "\n\n"
@@ -885,7 +960,7 @@ def ensure_config(workdir: Path) -> tuple[dict[str, Any], str]:
 
     device_prompt = build_device_environment_context(str(workdir))
     system_prompt = device_prompt + "\n\n" + DEFAULT_SYSTEM_PROMPT
-    return DEFAULT_MODEL_CONFIG, system_prompt
+    return merged_config, system_prompt
 
 
 def build_client(model_cfg: dict[str, Any]) -> OpenAI:
@@ -931,7 +1006,7 @@ def get_tool_description(tool_call: Any) -> str:
     if not isinstance(tool_name, str) or not tool_name:
         return ""
 
-    for definition in TOOL_DEFINITIONS + _mcp_manager.tool_definitions:
+    for definition in get_builtin_tool_definitions() + _mcp_manager.tool_definitions:
         function = definition.get("function") or {}
         if function.get("name") == tool_name:
             return str(function.get("description", "")).strip()
@@ -939,35 +1014,192 @@ def get_tool_description(tool_call: Any) -> str:
     return ""
 
 
-async def _run_mcp_session(server_config: dict[str, Any], handler: Any) -> Any:
-    transport = str(server_config.get("transport") or server_config.get("type") or "stdio").lower()
-    if transport in {"http", "streamable_http", "streamable-http"}:
-        url = server_config.get("url")
-        headers = server_config.get("headers") or {}
-        if not url:
-            raise RuntimeError("MCP HTTP server is missing a URL")
-        async with streamablehttp_client(url, headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                return await handler(session)
+class MCPClientPool:
+    """Maintains persistent MCP sessions per server on a dedicated background event loop.
 
-    if transport == "sse":
-        url = server_config.get("url")
-        headers = server_config.get("headers") or {}
-        if not url:
-            raise RuntimeError("MCP SSE server is missing a URL")
-        async with sse_client(url, headers=headers) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                return await handler(session)
+    Sessions are reused across tool calls instead of being re-established for every
+    invocation, which avoids repeatedly paying the (slow) stdio/npx startup cost.
+    """
 
-    command = server_config.get("command") or "npx"
-    args = list(server_config.get("args") or ["-y", "bing-cn-mcp"])
-    server_params = StdioServerParameters(command=command, args=args)
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._sessions: dict[str, ClientSession] = {}
+        self._stacks: dict[str, AsyncExitStack] = {}
+        self._start_lock = threading.Lock()
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        with self._start_lock:
+            if self._loop is not None and not self._loop.is_closed():
+                return self._loop
+            self._thread = threading.Thread(target=self._loop_runner, name="mcp-pool", daemon=True)
+            self._thread.start()
+            while self._loop is None:
+                time.sleep(0.01)
+            return self._loop
+
+    def _loop_runner(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+
+    @staticmethod
+    def _config_key(server_config: dict[str, Any]) -> str:
+        return json.dumps(server_config, sort_keys=True, ensure_ascii=False)
+
+    async def _open_session(self, key: str, server_config: dict[str, Any]) -> ClientSession:
+        if key in self._sessions:
+            return self._sessions[key]
+        stack = AsyncExitStack()
+        try:
+            transport = str(server_config.get("transport") or server_config.get("type") or "stdio").lower()
+            if transport in {"http", "streamable_http", "streamable-http"}:
+                url = server_config.get("url")
+                if not url:
+                    raise RuntimeError("MCP HTTP server is missing a URL")
+                read, write, _ = await stack.enter_async_context(
+                    streamablehttp_client(url, headers=server_config.get("headers") or {})
+                )
+            elif transport == "sse":
+                url = server_config.get("url")
+                if not url:
+                    raise RuntimeError("MCP SSE server is missing a URL")
+                read, write = await stack.enter_async_context(
+                    sse_client(url, headers=server_config.get("headers") or {})
+                )
+            else:
+                command = server_config.get("command") or "npx"
+                args = list(server_config.get("args") or ["-y", "bing-cn-mcp"])
+                read, write = await stack.enter_async_context(
+                    stdio_client(StdioServerParameters(command=command, args=args))
+                )
+            session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            return await handler(session)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stacks[key] = stack
+        self._sessions[key] = session
+        return session
+
+    def get_session(self, server_config: dict[str, Any]) -> ClientSession:
+        key = self._config_key(server_config)
+        session = self._sessions.get(key)
+        if session is not None:
+            return session
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(self._open_session(key, server_config), loop)
+        return future.result(timeout=MCP_SESSION_START_TIMEOUT)
+
+    async def _close_session(self, key: str) -> None:
+        stack = self._stacks.pop(key, None)
+        self._sessions.pop(key, None)
+        if stack is not None:
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+
+    def _invalidate(self, key: str) -> None:
+        if self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._close_session(key), self._loop).result(timeout=10)
+        except Exception:
+            pass
+
+    def _submit(self, coro: Any) -> Any:
+        loop = self._ensure_loop()
+        return asyncio.run_coroutine_threadsafe(coro, loop)
+
+    def warm_sessions(self, server_configs: list[dict[str, Any]]) -> None:
+        """Open sessions for all servers in parallel (used at startup)."""
+        loop = self._ensure_loop()
+        futures = [
+            asyncio.run_coroutine_threadsafe(self._open_session(self._config_key(config), config), loop)
+            for config in server_configs
+        ]
+        for future in futures:
+            try:
+                future.result(timeout=MCP_SESSION_START_TIMEOUT)
+            except Exception:
+                continue
+
+    def list_tools(self, server_config: dict[str, Any]) -> Any:
+        session = self.get_session(server_config)
+        future = self._submit(session.list_tools())
+        return future.result(timeout=MCP_SESSION_START_TIMEOUT)
+
+    @staticmethod
+    def _serialize_tool_result(result: Any) -> dict[str, Any]:
+        serialized = result.model_dump(mode="json")
+        content = serialized.get("content")
+        if isinstance(content, list):
+            items = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text is not None:
+                        items.append(text)
+                    else:
+                        items.append(item)
+                else:
+                    items.append(str(item))
+            normalized = items[0] if len(items) == 1 else items
+        else:
+            normalized = content
+        return {
+            "status": "error" if bool(serialized.get("isError")) else "ok",
+            "content": normalized,
+        }
+
+    async def _call_tool_async(self, session: ClientSession, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await session.call_tool(name, arguments or {})
+        return self._serialize_tool_result(result)
+
+    def call_tool(self, server_config: dict[str, Any], name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        key = self._config_key(server_config)
+        session = self.get_session(server_config)
+        future = self._submit(self._call_tool_async(session, name, arguments))
+        try:
+            return future.result(timeout=MCP_TOOL_CALL_TIMEOUT)
+        except Exception:
+            # The persistent session may be broken (server restart, protocol error).
+            # Invalidate it and retry once on a fresh session before giving up.
+            future.cancel()
+            self._invalidate(key)
+            session = self.get_session(server_config)
+            retry = self._submit(self._call_tool_async(session, name, arguments))
+            return retry.result(timeout=MCP_TOOL_CALL_TIMEOUT)
+
+    async def _aclose_all(self) -> None:
+        for key in list(self._stacks):
+            await self._close_session(key)
+
+    def shutdown(self) -> None:
+        if self._loop is None:
+            return
+        try:
+            self._submit(self._aclose_all()).result(timeout=10)
+        except Exception:
+            pass
+        try:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+        except Exception:
+            pass
+        self._loop = None
+        self._thread = None
+
+
+# Global MCP session pool shared by discovery and tool execution.
+_mcp_pool = MCPClientPool()
+atexit.register(_mcp_pool.shutdown)
 
 
 def normalize_mcp_server_config(raw_config: Any, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1046,30 +1278,24 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
         _mcp_manager.clear()
         return []
 
-    # Initialize via _mcp_manager
-
-    async def _discover_one(server_config: dict[str, Any]) -> list[dict[str, Any]]:
-        async def _handler(session: ClientSession) -> list[dict[str, Any]]:
-            tools = await session.list_tools()
-            return [normalize_mcp_tool_definition(tool) for tool in tools.tools]
-
-        return await _run_mcp_session(server_config, _handler)
-
     try:
+        # Connect to every server (in parallel) and keep the sessions open for reuse.
+        _mcp_pool.warm_sessions(server_configs)
+
         definitions: list[dict[str, Any]] = []
         active_configs: list[dict[str, Any]] = []
-        async def _discover_all() -> None:
-            for server_config in server_configs:
-                try:
-                    discovered = await _discover_one(server_config)
-                    definitions.extend(discovered)
-                    active_configs.append(server_config)
-                    for item in discovered:
-                        _mcp_manager.server_by_name[item["function"]["name"]] = server_config
-                except Exception:
-                    logger.exception(t("mcp_discover_failed") + f", server={server_config.get('name')}")
-                    console.print(Panel.fit(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed")))
-        asyncio.run(_discover_all())
+        for server_config in server_configs:
+            try:
+                tools = _mcp_pool.list_tools(server_config)
+            except Exception:
+                logger.exception(t("mcp_discover_failed") + f", server={server_config.get('name')}")
+                console.print(Panel.fit(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed")))
+                continue
+            discovered = [normalize_mcp_tool_definition(tool) for tool in tools.tools]
+            definitions.extend(discovered)
+            active_configs.append(server_config)
+            for item in discovered:
+                _mcp_manager.server_by_name[item["function"]["name"]] = server_config
 
         _mcp_manager.set_tools(definitions, active_configs)
         logger.info("Discovered MCP tool definitions: %s", [item["function"]["name"] for item in definitions])
@@ -1085,34 +1311,10 @@ def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if not server_config:
         return {"status": "error", "content": t("mcp_tool_not_found", name=name)}
 
-    async def _invoke() -> dict[str, Any]:
-        async def _handler(session: ClientSession) -> dict[str, Any]:
-            result = await session.call_tool(name, arguments or {})
-            serialized = result.model_dump(mode="json")
-            content = serialized.get("content")
-            if isinstance(content, list):
-                items = []
-                for item in content:
-                    if isinstance(item, dict):
-                        text = item.get("text")
-                        if text is not None:
-                            items.append(text)
-                        else:
-                            items.append(item)
-                    else:
-                        items.append(str(item))
-                normalized = items[0] if len(items) == 1 else items
-            else:
-                normalized = content
-            return {
-                "status": "error" if bool(serialized.get("isError")) else "ok",
-                "content": normalized,
-            }
-
-        return await _run_mcp_session(server_config, _handler)
-
     try:
-        return asyncio.run(_invoke())
+        # Reuses the persistent session from MCPClientPool instead of spawning a
+        # new server process (e.g. npx) for every single tool invocation.
+        return _mcp_pool.call_tool(server_config, name, arguments)
     except Exception:
         logger.exception(t("mcp_tool_failed") + f", tool={name}")
         return {"status": "error", "content": traceback.format_exc()}
@@ -1252,6 +1454,10 @@ def run_subprocess_background(
             "content": f"Failed to start background process: {exc}",
         }
 
+    # The child process inherits the log handle, so the parent can close its own
+    # copy right away to avoid leaking file descriptors.
+    log_file.close()
+
     # Quick-crash probe: if the process exits within startup_timeout seconds,
     # capture whatever it wrote to the log and report it back to the model.
     startup_lines: list[str] = []
@@ -1265,15 +1471,10 @@ def run_subprocess_background(
     if code is not None:
         # Process exited during the probe window (quick crash / port conflict).
         try:
-            log_file.flush()
-        except Exception:
-            pass
-        try:
             with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
                 startup_lines = lf.read().splitlines()[-40:]
         except Exception:
             startup_lines = []
-        log_file.close()
         snippet = "\n".join(startup_lines) or "(no output)"
         return {
             "status": "error",
@@ -1301,9 +1502,386 @@ def run_subprocess_background(
     }
 
 
+def _tool_error(name: str, arg: str) -> dict[str, Any]:
+    return {"status": "error", "content": t("tool_missing_arg", name=name, arg=arg)}
+
+
+def _walk_tree(root: Path, ignore_names: set[str], max_entries: int) -> list[str]:
+    """Iteratively walk a directory tree, pruning ignored dirs and capping results."""
+    results: list[str] = []
+    stack: list[Path] = [root]
+    while stack and len(results) < max_entries:
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir(), reverse=True)
+        except OSError:
+            continue
+        for child in children:
+            if len(results) >= max_entries:
+                break
+            if child.name in ignore_names:
+                continue
+            results.append(str(child))
+            if child.is_dir() and not child.is_symlink():
+                stack.append(child)
+    return results
+
+
+def _tool_read_file(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("read_file missing path argument, raw args: %s", args)
+        return _tool_error("read_file", "path")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "error", "content": f"File does not exist: {path}"}
+    try:
+        file_size = path.stat().st_size
+    except OSError as exc:
+        return {"status": "error", "content": f"Failed to stat file: {path}\n{exc}"}
+    if file_size > MAX_READ_FILE_BYTES:
+        return {
+            "status": "error",
+            "content": (
+                f"File is too large to read into context: {path} ({file_size} bytes, "
+                f"limit is {MAX_READ_FILE_BYTES} bytes). Read it in chunks with a "
+                "Python script instead."
+            ),
+        }
+    try:
+        content, encoding = read_text_with_fallback(path)
+    except Exception as exc:
+        return {"status": "error", "content": f"Failed to read file: {path}\n{exc}"}
+    if len(content) > MAX_READ_FILE_CHARS:
+        content = content[:MAX_READ_FILE_CHARS] + f"\n... (truncated, total={len(content)} chars)"
+    if encoding != "utf-8":
+        content += f"\n(Note: file was not valid UTF-8 and was decoded as {encoding}.)"
+    return {"status": "ok", "content": content}
+
+
+def _tool_write_file(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("write_file missing path argument, raw args: %s", args)
+        return _tool_error("write_file", "path")
+    content = args.get("content", "")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(path, content)
+    except Exception as exc:
+        return {"status": "error", "content": f"Failed to write file: {path}\n{exc}"}
+    return {"status": "ok", "content": f"Written: {path}"}
+
+
+def _tool_delete_file(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("delete_file missing path argument, raw args: %s", args)
+        return _tool_error("delete_file", "path")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "error", "content": f"File does not exist: {path}"}
+    try:
+        path.unlink()
+    except OSError as exc:
+        return {"status": "error", "content": f"Failed to delete file: {path}\n{exc}"}
+    return {"status": "ok", "content": f"Deleted: {path}"}
+
+
+def _tool_create_directory(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("create_directory missing path argument, raw args: %s", args)
+        return _tool_error("create_directory", "path")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"status": "error", "content": f"Failed to create directory: {path}\n{exc}"}
+    return {"status": "ok", "content": f"Created directory: {path}"}
+
+
+def _tool_delete_directory(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("delete_directory missing path argument, raw args: %s", args)
+        return _tool_error("delete_directory", "path")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "error", "content": f"Directory does not exist: {path}"}
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        return {"status": "error", "content": f"Failed to delete directory: {path}\n{exc}"}
+    return {"status": "ok", "content": f"Deleted directory: {path}"}
+
+
+def _tool_rename_path(args: dict[str, Any]) -> dict[str, Any]:
+    old_path = args.get("old_path")
+    new_path = args.get("new_path")
+    if not old_path or not new_path:
+        logger.error("rename_path missing arguments, raw args: %s", args)
+        return _tool_error("rename_path", "old_path/new_path")
+    old, error = resolve_tool_path(old_path, "old_path")
+    if error:
+        return error
+    new, error = resolve_tool_path(new_path, "new_path")
+    if error:
+        return error
+    if not old.exists():
+        return {"status": "error", "content": f"Path does not exist: {old}"}
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.rename(new)
+    except OSError as exc:
+        return {"status": "error", "content": f"Failed to rename: {old} -> {new}\n{exc}"}
+    return {"status": "ok", "content": f"Renamed: {old} -> {new}"}
+
+
+def _tool_copy_file(args: dict[str, Any]) -> dict[str, Any]:
+    source_path = args.get("source_path")
+    destination_path = args.get("destination_path")
+    if not source_path or not destination_path:
+        logger.error("copy_file missing arguments, raw args: %s", args)
+        return _tool_error("copy_file", "source_path/destination_path")
+    source, error = resolve_tool_path(source_path, "source_path")
+    if error:
+        return error
+    destination, error = resolve_tool_path(destination_path, "destination_path")
+    if error:
+        return error
+    if not source.exists():
+        return {"status": "error", "content": f"Source file does not exist: {source}"}
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        return {"status": "error", "content": f"Failed to copy: {source} -> {destination}\n{exc}"}
+    return {"status": "ok", "content": f"Copied: {source} -> {destination}"}
+
+
+def _tool_read_image_as_base64(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("read_image_as_base64 missing path argument, raw args: %s", args)
+        return _tool_error("read_image_as_base64", "path")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "error", "content": f"Image file does not exist: {path}"}
+    return {"status": "ok", "content": json.dumps({"path": str(path), "message": "Image loaded into context for multimodal analysis."}, ensure_ascii=False)}
+
+
+def _tool_list_dir(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    if not file_path:
+        logger.error("list_dir missing path argument, raw args: %s", args)
+        return _tool_error("list_dir", "path")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
+
+    recursive = bool(args.get("recursive", False))
+    if recursive:
+        items = _walk_tree(path, IGNORED_DIR_NAMES, MAX_LIST_DIR_ENTRIES)
+        if len(items) >= MAX_LIST_DIR_ENTRIES:
+            items = items + [f"... (output truncated at {MAX_LIST_DIR_ENTRIES} entries)"]
+    else:
+        try:
+            items = sorted(str(p) for p in path.iterdir())
+        except OSError as exc:
+            return {"status": "error", "content": f"Failed to list directory: {path}\n{exc}"}
+    return {"status": "ok", "content": json.dumps(items, ensure_ascii=False)}
+
+
+def _tool_search_code(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    pattern = args.get("pattern")
+    if not file_path or not pattern:
+        logger.error("search_code missing arguments, raw args: %s", args)
+        return _tool_error("search_code", "path/pattern")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
+
+    recursive = bool(args.get("recursive", True))
+    max_results = args.get("max_results")
+    try:
+        max_results = int(max_results) if max_results is not None else 50
+    except (TypeError, ValueError):
+        max_results = 50
+    if max_results <= 0:
+        max_results = 50
+
+    if path.is_file():
+        candidates = [path]
+    elif recursive:
+        candidates = [Path(item) for item in _walk_tree(path, IGNORED_DIR_NAMES, MAX_LIST_DIR_ENTRIES)]
+    else:
+        candidates = [item for item in sorted(path.iterdir())]
+
+    matches: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if len(matches) >= max_results:
+            break
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                continue
+            content, _encoding = read_text_with_fallback(candidate)
+        except (OSError, ValueError):
+            continue
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            if pattern in line:
+                matches.append({
+                    "path": str(candidate.resolve()),
+                    "line": line_number,
+                    "content": line,
+                })
+                if len(matches) >= max_results:
+                    break
+    return {"status": "ok", "content": json.dumps(matches, ensure_ascii=False)}
+
+
+def _tool_edit_file(args: dict[str, Any]) -> dict[str, Any]:
+    file_path = args.get("path") or args.get("file_path")
+    old_string = args.get("old_string")
+    new_string = args.get("new_string")
+    if not file_path or old_string is None or new_string is None:
+        logger.error("edit_file missing arguments, raw args: %s", args)
+        return _tool_error("edit_file", "path/old_string/new_string")
+    path, error = resolve_tool_path(file_path, "path")
+    if error:
+        return error
+    if not path.exists():
+        return {"status": "error", "content": f"File does not exist: {path}"}
+    try:
+        original_text, _encoding = read_text_with_fallback(path)
+    except Exception as exc:
+        return {"status": "error", "content": f"Failed to read file: {path}\n{exc}"}
+
+    if not old_string:
+        return {"status": "error", "content": "old_string must not be empty."}
+    occurrences = original_text.count(old_string)
+    if occurrences == 0:
+        return {"status": "error", "content": f"Target text not found in file: {path}"}
+    if occurrences > 1:
+        return {
+            "status": "error",
+            "content": (
+                f"Target text appears {occurrences} times in {path}. "
+                "Provide a longer, unique old_string (include surrounding lines) to disambiguate."
+            ),
+        }
+
+    updated_text = original_text.replace(old_string, new_string, 1)
+    try:
+        write_text_atomic(path, updated_text)
+    except Exception as exc:
+        return {"status": "error", "content": f"Failed to write file: {path}\n{exc}"}
+    return {"status": "ok", "content": f"Updated: {path}"}
+
+
+def _tool_execute_python_script(args: dict[str, Any]) -> dict[str, Any]:
+    script = args.get("script")
+    if not script:
+        logger.error("execute_python_script missing script argument, raw args: %s", args)
+        return _tool_error("execute_python_script", "script")
+    cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
+
+    # Long-running service mode: start detached and return immediately.
+    background = bool(args.get("background") or args.get("wait") is False)
+
+    try:
+        startup_timeout = int(args.get("startup_timeout") or 3)
+    except (TypeError, ValueError):
+        startup_timeout = 3
+
+    # Use tempfile to avoid race conditions
+    script_path = None
+    fd, script_path_str = tempfile.mkstemp(suffix=".py", prefix="cli_script_", dir=cwd)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(script)
+        script_path = Path(script_path_str)
+
+        if background:
+            # Long-running service: start detached, return immediately with PID/log.
+            # The script file is intentionally NOT deleted: the detached process may
+            # not have opened it yet on Windows, and deleting it would break startup.
+            response = run_subprocess_background(
+                [sys.executable, str(script_path)],
+                cwd,
+                shell=False,
+                startup_timeout=startup_timeout,
+                log_dir=cwd,
+            )
+            if response.get("status") == "running":
+                response["script_path"] = str(script_path)
+            return response
+
+        # Foreground / short command: get the timeout, default 120s, capped at 360s.
+        try:
+            timeout_seconds = int(args.get("timeout_seconds") or 120)
+        except (TypeError, ValueError):
+            timeout_seconds = 120
+        timeout_seconds = min(max(timeout_seconds, 10), TOOL_SUBPROCESS_TIMEOUT)
+
+        returncode, stdout, stderr = run_subprocess_command(
+            [sys.executable, str(script_path)],
+            cwd,
+            shell=False,
+            timeout=timeout_seconds
+        )
+        return {
+            "status": "ok" if returncode == 0 else "error",
+            "content": stdout + stderr,
+            "returncode": returncode,
+        }
+    finally:
+        # Cleanup temp file (foreground runs only; background scripts are kept).
+        if script_path is not None and not background:
+            try:
+                script_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+BUILTIN_TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "read_file": _tool_read_file,
+    "write_file": _tool_write_file,
+    "delete_file": _tool_delete_file,
+    "create_directory": _tool_create_directory,
+    "delete_directory": _tool_delete_directory,
+    "rename_path": _tool_rename_path,
+    "copy_file": _tool_copy_file,
+    "read_image_as_base64": _tool_read_image_as_base64,
+    "list_dir": _tool_list_dir,
+    "search_code": _tool_search_code,
+    "edit_file": _tool_edit_file,
+    "execute_python_script": _tool_execute_python_script,
+}
+
+
 def execute_tool_call(tool_call: Any) -> dict[str, Any]:
     """Execute a tool call and return the result."""
-    # Type check for tool_call
     if not hasattr(tool_call, 'function'):
         return {"status": "error", "content": "Invalid tool call object"}
     name = getattr(tool_call.function, "name", "")
@@ -1311,349 +1889,17 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
     ensure_not_interrupted()
     logger.info(t("tool_execution", name=name, args=args))
 
-    if name == "read_file":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="read_file", arg="path")}
-            logger.error("read_file missing path argument, raw args: %s", args)
-            return result
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "error", "content": f"File does not exist: {path}"}
-            logger.info("read_file result: %s", result)
-            return result
-
-        try:
-            content = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            result = {
-                "status": "error",
-                "content": f"Unable to read as UTF-8 text: {path}\nThis file may be binary or encoded in another charset.",
-            }
-            logger.warning("read_file failed due to non-UTF8 content: %s", path)
-            logger.info("read_file result: %s", result)
-            return result
-        except Exception as exc:
-            result = {"status": "error", "content": f"Failed to read file: {path}\n{exc}"}
-            logger.exception("read_file failed: %s", path)
-            logger.info("read_file result: %s", result)
-            return result
-
-        result = {"status": "ok", "content": content}
-        logger.info("read_file result: %s", result)
-        return result
-
-    if name == "write_file":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="write_file", arg="path")}
-            logger.error("write_file missing path argument, raw args: %s", args)
-            return result
-        content = args.get("content", "")
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        result = {"status": "ok", "content": f"Written: {path}"}
-        logger.info("write_file result: %s", result)
-        return result
-
-    if name == "delete_file":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="delete_file", arg="path")}
-            logger.error("delete_file missing path argument, raw args: %s", args)
-            return result
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "error", "content": f"File does not exist: {path}"}
-            logger.info("delete_file result: %s", result)
-            return result
-        path.unlink()
-        result = {"status": "ok", "content": f"Deleted: {path}"}
-        logger.info("delete_file result: %s", result)
-        return result
-
-    if name == "create_directory":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="create_directory", arg="path")}
-            logger.error("create_directory missing path argument, raw args: %s", args)
-            return result
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        path.mkdir(parents=True, exist_ok=True)
-        result = {"status": "ok", "content": f"Created directory: {path}"}
-        logger.info("create_directory result: %s", result)
-        return result
-
-    if name == "delete_directory":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="delete_directory", arg="path")}
-            logger.error("delete_directory missing path argument, raw args: %s", args)
-            return result
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "error", "content": f"Directory does not exist: {path}"}
-            logger.info("delete_directory result: %s", result)
-            return result
-        shutil.rmtree(path)
-        result = {"status": "ok", "content": f"Deleted directory: {path}"}
-        logger.info("delete_directory result: %s", result)
-        return result
-
-    if name == "rename_path":
-        old_path = args.get("old_path")
-        new_path = args.get("new_path")
-        if not old_path or not new_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="rename_path", arg="old_path/new_path")}
-            logger.error("rename_path missing arguments, raw args: %s", args)
-            return result
-        old, error = resolve_tool_path(old_path, "old_path")
-        if error:
-            return error
-        new, error = resolve_tool_path(new_path, "new_path")
-        if error:
-            return error
-        if not old.exists():
-            result = {"status": "error", "content": f"Path does not exist: {old}"}
-            logger.info("rename_path result: %s", result)
-            return result
-        new.parent.mkdir(parents=True, exist_ok=True)
-        old.rename(new)
-        result = {"status": "ok", "content": f"Renamed: {old} -> {new}"}
-        logger.info("rename_path result: %s", result)
-        return result
-
-    if name == "copy_file":
-        source_path = args.get("source_path")
-        destination_path = args.get("destination_path")
-        if not source_path or not destination_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="copy_file", arg="source_path/destination_path")}
-            logger.error("copy_file missing arguments, raw args: %s", args)
-            return result
-        source, error = resolve_tool_path(source_path, "source_path")
-        if error:
-            return error
-        destination, error = resolve_tool_path(destination_path, "destination_path")
-        if error:
-            return error
-        if not source.exists():
-            result = {"status": "error", "content": f"Source file does not exist: {source}"}
-            logger.info("copy_file result: %s", result)
-            return result
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        result = {"status": "ok", "content": f"Copied: {source} -> {destination}"}
-        logger.info("copy_file result: %s", result)
-        return result
-
-    if name == "read_image_as_base64":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="read_image_as_base64", arg="path")}
-            logger.error("read_image_as_base64 missing path argument, raw args: %s", args)
-            return result
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "error", "content": f"Image file does not exist: {path}"}
-            logger.info("read_image_as_base64 result: %s", result)
-            return result
-
-        result = {"status": "ok", "content": json.dumps({"path": str(path), "message": "Image loaded into context for multimodal analysis."}, ensure_ascii=False)}
-        logger.info("read_image_as_base64 result: %s", result)
-        return result
-
-    if name == "list_dir":
-        file_path = args.get("path") or args.get("file_path")
-        if not file_path:
-            result = {"status": "error", "content": t("tool_missing_arg", name="list_dir", arg="path")}
-            logger.error("list_dir missing path argument, raw args: %s", args)
-            return result
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
-            logger.info("list_dir result: %s", result)
-            return result
-
-        recursive = bool(args.get("recursive", False))
-        if recursive:
-            items = []
-            for item in sorted(path.rglob("*")):
-                try:
-                    items.append(str(item.resolve()))
-                except OSError:
-                    items.append(str(item))
-        else:
-            items = sorted([str(p) for p in path.iterdir()])
-        result = {"status": "ok", "content": json.dumps(items, ensure_ascii=False)}
-        logger.info("list_dir result: %s", result)
-        return result
-
-    if name == "search_code":
-        file_path = args.get("path") or args.get("file_path")
-        pattern = args.get("pattern")
-        if not file_path or not pattern:
-            result = {"status": "error", "content": t("tool_missing_arg", name="search_code", arg="path/pattern")}
-            logger.error("search_code missing arguments, raw args: %s", args)
-            return result
-
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "ok", "content": json.dumps([], ensure_ascii=False)}
-            logger.info("search_code result: %s", result)
-            return result
-
-        recursive = bool(args.get("recursive", True))
-        max_results = args.get("max_results")
-        try:
-            max_results = int(max_results) if max_results is not None else 50
-        except (TypeError, ValueError):
-            max_results = 50
-
-        matches: list[dict[str, Any]] = []
-        if path.is_file():
-            candidates = [path]
-        elif recursive:
-            candidates = [item for item in sorted(path.rglob("*")) if item.is_file()]
-        else:
-            candidates = [item for item in sorted(path.iterdir()) if item.is_file()]
-
-        for candidate in candidates:
-            try:
-                content = candidate.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            for line_number, line in enumerate(content.splitlines(), start=1):
-                if pattern in line:
-                    matches.append({
-                        "path": str(candidate.resolve()),
-                        "line": line_number,
-                        "content": line,
-                    })
-                    if len(matches) >= max_results:
-                        break
-            if len(matches) >= max_results:
-                break
-
-        result = {"status": "ok", "content": json.dumps(matches, ensure_ascii=False)}
-        logger.info("search_code result: %s", result)
-        return result
-
-    if name == "edit_file":
-        file_path = args.get("path") or args.get("file_path")
-        old_string = args.get("old_string")
-        new_string = args.get("new_string")
-        if not file_path or old_string is None or new_string is None:
-            result = {"status": "error", "content": t("tool_missing_arg", name="edit_file", arg="path/old_string/new_string")}
-            logger.error("edit_file missing arguments, raw args: %s", args)
-            return result
-
-        path, error = resolve_tool_path(file_path, "path")
-        if error:
-            return error
-        if not path.exists():
-            result = {"status": "error", "content": f"File does not exist: {path}"}
-            logger.info("edit_file result: %s", result)
-            return result
-
-        try:
-            original_text = path.read_text(encoding="utf-8")
-        except Exception as exc:
-            result = {"status": "error", "content": f"Failed to read file: {path}\n{exc}"}
-            logger.exception("edit_file failed: %s", path)
-            logger.info("edit_file result: %s", result)
-            return result
-
-        if old_string not in original_text:
-            result = {"status": "error", "content": f"Target text not found in file: {path}"}
-            logger.info("edit_file result: %s", result)
-            return result
-
-        updated_text = original_text.replace(old_string, new_string, 1)
-        path.write_text(updated_text, encoding="utf-8")
-        result = {"status": "ok", "content": f"Updated: {path}"}
-        logger.info("edit_file result: %s", result)
-        return result
-
-    if name == "execute_python_script":
-        script = args.get("script")
-        if not script:
-            result = {"status": "error", "content": t("tool_missing_arg", name="execute_python_script", arg="script")}
-            logger.error("execute_python_script missing script argument, raw args: %s", args)
-            return result
-        cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
-
-        # Long-running service mode: start detached and return immediately.
-        background = bool(args.get("background") or args.get("wait") is False)
-        
-        # Use tempfile to avoid race conditions
-        script_path = None
-        fd, script_path_str = tempfile.mkstemp(suffix=".py", prefix="cli_script_", dir=cwd)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(script)
-            script_path = Path(script_path_str)
-            
-            # 获取请求超时可配置默认 120 秒、最大 360 秒
-            if background:
-                # Long-running service: start detached, return immediately with PID/log.
-                response = run_subprocess_background(
-                    [sys.executable, str(script_path)],
-                    cwd,
-                    shell=False,
-                    startup_timeout=int(args.get("startup_timeout") or 3),
-                    log_dir=cwd,
-                )
-                logger.info("execute_python_script(background) result: %s", response)
-                return response
-
-            # Foreground / short command: get the timeout, default 120s, capped at 360s.
-            timeout_seconds = int(args.get("timeout_seconds") or 120)
-            timeout_seconds = min(max(timeout_seconds, 10), TOOL_SUBPROCESS_TIMEOUT)
-            
-            returncode, stdout, stderr = run_subprocess_command(
-                [sys.executable, str(script_path)], 
-                cwd, 
-                shell=False, 
-                timeout=timeout_seconds
-            )
-            response = {
-                "status": "ok" if returncode == 0 else "error",
-                "content": stdout + stderr,
-                "returncode": returncode,
-            }
-            logger.info("execute_python_script result: %s", response)
-            return response
-        finally:
-            # Cleanup temp file
-            try:
-                script_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-
-    if name in {item["function"]["name"] for item in ACTIVE_MCP_TOOL_DEFINITIONS}:
+    handler = BUILTIN_TOOL_HANDLERS.get(name)
+    if handler is not None:
+        result = handler(args)
+    elif name in {item["function"]["name"] for item in ACTIVE_MCP_TOOL_DEFINITIONS()}:
         logger.info("Executing MCP tool: %s, args: %s", name, args)
         return run_mcp_tool(name, args)
+    else:
+        logger.error("Unknown tool call: %s", name)
+        return {"status": "error", "content": t("unknown_tool", name=name)}
 
-    result = {"status": "error", "content": t("unknown_tool", name=name)}
-    logger.error("Unknown tool call: %s", name)
+    logger.info("%s result: %s", name, summarize_tool_result(result))
     return result
 
 
@@ -1712,18 +1958,25 @@ def show_tool_result(tool_call: Any, result: dict[str, Any]) -> None:
 
 
 def _filter_think_tags(content: str) -> str:
-    """Remove <think>..</think> and standalone <think/> tags and their contents.
+    """Remove paired <think>..</think> and standalone <think/> tags and their contents.
 
     - Removes any content between an opening <think> (or <think/>) and a closing </think>.
     - Removes standalone tags like <think/> or <think>.
+    - An unclosed <think> opening tag truncates everything from the tag onwards.
     """
     if not content:
         return content
 
-    between_re = re.compile(r"<think\s*/?>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
+    between_re = re.compile(r"<think\b[^>]*>.*?</think\s*>", flags=re.IGNORECASE | re.DOTALL)
     result = between_re.sub("", content)
 
-    tag_re = re.compile(r"<think\s*/?>", flags=re.IGNORECASE)
+    # Unclosed opening tag (self-closing <think/> tags are NOT considered unclosed):
+    # drop everything from the tag to the end of content.
+    unclosed = re.search(r"<think\b[^>]*>", result, flags=re.IGNORECASE)
+    if unclosed and not unclosed.group(0).endswith("/>"):
+        result = result[: unclosed.start()]
+
+    tag_re = re.compile(r"<think\b[^>]*/?>", flags=re.IGNORECASE)
     result = tag_re.sub("", result)
 
     return result
@@ -1790,11 +2043,12 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
         logger.info("Model call interrupted by user")
         show_stage(t("cancelled"), t("model_cancelled"))
         raise
-    except asyncio.TimeoutError:
+    except (APITimeoutError, TimeoutError):
         logger.error("Model call timed out")
         assistant_message = SimpleNamespace()
         assistant_message.tool_calls = []
         assistant_message.content = "Model call timed out. Please try again."
+        assistant_message.is_error = True
         return assistant_message
     except Exception as exc:
         logger.exception(t("model_error"))
@@ -1812,6 +2066,7 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
         assistant_message = SimpleNamespace()
         assistant_message.tool_calls = []
         assistant_message.content = user_msg
+        assistant_message.is_error = True
         if debug_enabled:
             show_stage("Debug - model call error", traceback.format_exc())
         else:
@@ -1973,14 +2228,34 @@ def is_special_command(user_text: str) -> bool:
     return normalized in special_commands
 
 
-def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, user_text: str, debug_enabled: bool = False, recorder: ConversationRecorder | None = None) -> None:
+def _trim_conversation_window(conversation: list[dict[str, Any]], max_count: int) -> list[dict[str, Any]]:
+    """Keep the last max_count messages without breaking tool_calls/tool message pairs.
+
+    Cutting between an assistant message carrying tool_calls and its tool results
+    violates the chat API contract (a 400 error on most OpenAI-compatible backends),
+    so leading orphaned tool messages are dropped from the window.
+    """
+    window = conversation[-max_count:] if max_count > 0 else []
+    while window and window[0].get("role") == "tool":
+        window = window[1:]
+    if not window and conversation:
+        window = [conversation[-1]]
+    return window
+
+
+def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, user_text: str, debug_enabled: bool = False, recorder: ConversationRecorder | None = None, enable_planning: bool = True) -> None:
     reset_interruption_state()
     clear_task_memory_file()
     append_task_memory_entry(f"## Task started\n\nUser request: {summarize_memory_value(user_text, max_len=240)}\n\n")
 
     history = session_store.load()
     planned_user_text = user_text
-    if not is_special_command(user_text):
+    skip_planning = (
+        not enable_planning
+        or is_special_command(user_text)
+        or len(user_text.strip()) < PLANNING_MIN_INPUT_LENGTH
+    )
+    if not skip_planning:
         try:
             planned_user_text = plan_user_request(client, model, history, user_text, debug_enabled=debug_enabled)
         except Exception:
@@ -1998,15 +2273,16 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
     messages = []
     messages.extend(history)
 
-    MAX_AGENT_ITERATIONS = 50
     _agent_iteration = 0
     while _agent_iteration < MAX_AGENT_ITERATIONS:
         _agent_iteration += 1
         try:
             finalize_prompt = []
             # Keep system prompt separate, only truncate conversation messages
-            conversation_messages = [m for m in messages if m.get("role") != "system"]
-            conversation_messages = conversation_messages[-CHAT_MESSAGE_MAX_COUNT:]
+            conversation_messages = _trim_conversation_window(
+                [m for m in messages if m.get("role") != "system"],
+                CHAT_MESSAGE_MAX_COUNT,
+            )
             finalize_prompt.extend(conversation_messages)
             existing_first_prompt = first_task_prompt in conversation_messages
             if not existing_first_prompt:
@@ -2024,6 +2300,13 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
             console.print(Panel.fit(traceback.format_exc(), title=t("runtime_error_title")))
             if recorder:
                 recorder.record_error(traceback.format_exc())
+            return
+
+        # A failed model call (quota/timeout/5xx) must not be persisted into the
+        # session history as if it were a genuine assistant reply.
+        if getattr(assistant_message, "is_error", False):
+            if recorder:
+                recorder.record_error(assistant_message.content or "Model call failed")
             return
 
         tool_calls = to_tool_call_objects(list(getattr(assistant_message, "tool_calls", []) or []))
@@ -2110,7 +2393,7 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                 )
 
 
-def get_content_from_tool_calls(tool_calls: List) -> str:
+def get_content_from_tool_calls(tool_calls: list) -> str:
     """
     Extract the `content` field from a list of tool call objects
     (as returned by OpenAI's ChatCompletionMessage.tool_calls).
@@ -2258,7 +2541,7 @@ def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_pr
     console.print(Panel.fit(t("task_end_completed", path=out_path), title=t("task_end_done")))
 
 
-def interactive_loop(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, history_file: Path, debug_enabled: bool = False, recorder: ConversationRecorder | None = None) -> None:
+def interactive_loop(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, history_file: Path, debug_enabled: bool = False, recorder: ConversationRecorder | None = None, enable_planning: bool = True) -> None:
     console.print(Panel.fit(
         "[bold green]Prompt Pilot CLI Coding Agent[/bold green]\n"
         + t("welcome_message") + "\n",
@@ -2272,12 +2555,20 @@ def interactive_loop(client: OpenAI, model: str, system_prompt: str, session_sto
         complete_while_typing=True,
         bottom_toolbar=build_bottom_toolbar_text,
     )
+    last_ctrl_c_at = 0.0
     while True:
         try:
             user_text = session.prompt(t("prompt_placeholder"))
         except KeyboardInterrupt:
-            console.print("\n" + t("exit_message"))
-            return
+            # First Ctrl+C at the prompt just clears the input; a second press
+            # within a few seconds exits (consistent with the toolbar hint).
+            now = time.monotonic()
+            if now - last_ctrl_c_at <= 3.0:
+                console.print("\n" + t("exit_message"))
+                return
+            last_ctrl_c_at = now
+            console.print("\n" + t("ctrl_c_hint"))
+            continue
 
         if user_text.strip() == "/exit":
             console.print(t("bye_message"))
@@ -2295,7 +2586,7 @@ def interactive_loop(client: OpenAI, model: str, system_prompt: str, session_sto
             handle_task_end_command(md_path, client, model, system_prompt, WORKSPACE_DIR, debug_enabled=debug_enabled)
             continue
 
-        run_agent(client, model, system_prompt, session_store, user_text, debug_enabled=debug_enabled, recorder=recorder)
+        run_agent(client, model, system_prompt, session_store, user_text, debug_enabled=debug_enabled, recorder=recorder, enable_planning=enable_planning)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -2303,10 +2594,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {APPLICATION_VERSION}")
     parser.add_argument("-t", "--task", help=t("task_argument_help"))
     parser.add_argument("-d", "--workdir", default=WORKSPACE_DIR, help=t("workdir_argument_help"))
-    parser.add_argument("-l", "--lang", default="en", help="language code for localization (default: en)")
+    parser.add_argument("-l", "--lang", default="en", choices=["zh", "en"], help="language code for localization (zh / en, default: en)")
     parser.add_argument("-amc", "--agent-messages-count", default=CHAT_MESSAGE_MAX_COUNT, help=f"number of messages to keep in agent history (default: {CHAT_MESSAGE_MAX_COUNT})")
     parser.add_argument("-rd", "--request-delay", default=RE_ACTION_DELAY, help=f"delay in seconds between model requests (default: {RE_ACTION_DELAY})")
     parser.add_argument("-hc", "--history-count", default=DEFAULT_MAX_CHAT_COUNT, help=f"number of rounds to keep in conversation history (default: {DEFAULT_MAX_CHAT_COUNT})")
+    parser.add_argument("-np", "--no-plan", action="store_true", help=t("no_plan_help"))
     parser.add_argument("--reset-session", action="store_true", help=t("reset_session_help"))
     return parser
 
@@ -2371,13 +2663,13 @@ def main() -> None:
 
     if args.task:
         try:
-            run_agent(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, session_store, args.task, debug_enabled=debug_enabled, recorder=recorder)
+            run_agent(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, session_store, args.task, debug_enabled=debug_enabled, recorder=recorder, enable_planning=not args.no_plan)
         except KeyboardInterrupt:
             console.print(Panel.fit(t("task_cancelled"), title=t("interrupted_title")))
         return
 
     try:
-        interactive_loop(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, session_store, history_file, debug_enabled=debug_enabled, recorder=recorder)
+        interactive_loop(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, session_store, history_file, debug_enabled=debug_enabled, recorder=recorder, enable_planning=not args.no_plan)
     except KeyboardInterrupt:
         console.print(Panel.fit(t("task_cancelled"), title=t("interrupted_title")))
 
