@@ -2,17 +2,17 @@
 
 Prompt Copilot CLI is a lightweight terminal-based coding agent for local development workflows. It combines an OpenAI-compatible model with a set of practical tools for file operations, shell commands, Python execution, multimodal image handling, and MCP integrations.
 
-It is designed for developers who want an interactive coding assistant that can inspect a workspace, edit files, run commands, and help turn multi-step conversations into a final, actionable prompt.
+It is designed for developers who want an interactive coding assistant that can inspect a workspace, edit files, and run commands.
 
 ## ✨ Features
 
 - Interactive CLI experience in the terminal
-- Persistent session history and conversation logs
+- In-memory conversation context (keeps the last 50 rounds; cleared when the program exits)
 - File-system tools for reading, writing, deleting, renaming, copying, and recursive directory listing
 - Shell command execution and Python script execution
 - Image support for vision-capable models via image-to-base64 conversion
 - MCP tool integration for extending the agent with external tools
-- Task workflow with `/task-start` and `/task-end` to generate a polished final prompt
+- Streaming model output with inline `<think>` tag filtering
 
 ## 🚀 Quick Start
 
@@ -110,9 +110,7 @@ prompt-copilot -t "Create a simple HTML landing page" -d ./workspace -l en
 Once the CLI starts, you can use these commands:
 
 - `/exit` — quit the program
-- `/clear` — clear local session history
-- `/task-start` — start a task context for later summarization
-- `/task-end` — generate a final optimized prompt and save it to `last-prompt.md`
+- `/clear` — clear the in-memory conversation history
 
 ### Common startup options
 
@@ -125,10 +123,7 @@ Key options:
 - `-t, --task` — one-off task content
 - `-d, --workdir` — working directory
 - `-l, --lang` — language (`zh` or `en`)
-- `-amc, --agent-messages-count` — number of messages kept in agent history
 - `-rd, --request-delay` — delay between model requests in seconds
-- `-hc, --history-count` — number of rounds kept in conversation history
-- `--reset-session` — reset persisted session history
 
 ### Example workflows
 
@@ -172,17 +167,6 @@ The agent can call the following tools:
   - `execute_python_script`
 - Multimodal tools
   - `read_image_as_base64`
-
-## 🧠 Task flow
-
-The project supports a lightweight task-iteration workflow:
-
-1. Start a round with `/task-start`
-2. Continue interacting with the agent to clarify requirements or refine the task
-3. Finish with `/task-end`
-4. The agent writes the final prompt to `last-prompt.md`
-
-This is useful when you want to turn a long back-and-forth conversation into a compact, executable prompt.
 
 ## 📁 Project structure
 

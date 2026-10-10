@@ -5,7 +5,6 @@ import asyncio
 import atexit
 import base64
 import json
-import logging
 import os
 import platform
 import re
@@ -18,7 +17,7 @@ import threading
 import time
 import traceback
 from contextlib import AsyncExitStack
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -32,7 +31,6 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completion, Completer
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
-from rich.panel import Panel
 
 
 ROOT = Path.home() / ".prompt-copilot"
@@ -67,21 +65,6 @@ def update_total_token_usage(usage: Any) -> None:
             TOTAL_TOKEN_USAGE[key] += int(value)
 
 
-def format_usage_summary(usage: Any) -> str:
-    if usage is None:
-        return t("token_usage_unavailable")
-
-    prompt_tokens = getattr(usage, "prompt_tokens", None)
-    completion_tokens = getattr(usage, "completion_tokens", None)
-    total_tokens = getattr(usage, "total_tokens", None)
-
-    return (
-        f"{t('prompt_tokens_label')}={prompt_tokens if prompt_tokens is not None else '-'} | "
-        f"{t('completion_tokens_label')}={completion_tokens if completion_tokens is not None else '-'} | "
-        f"{t('total_tokens_label')}={total_tokens if total_tokens is not None else '-'}"
-    )
-
-
 def format_cumulative_token_summary() -> str:
     return (
         f"{t('token_usage_label')} "
@@ -89,52 +72,6 @@ def format_cumulative_token_summary() -> str:
         f"{t('completion_tokens_label')}={TOTAL_TOKEN_USAGE['completion_tokens']} | "
         f"{t('total_tokens_label')}={TOTAL_TOKEN_USAGE['total_tokens']}"
     )
-
-
-def clear_task_memory_file() -> None:
-    MEMORY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MEMORY_FILE_PATH.write_text("# Task Execution Memory\n\n", encoding="utf-8")
-
-
-def append_task_memory_entry(text: str) -> None:
-    MEMORY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with MEMORY_FILE_PATH.open("a", encoding="utf-8") as f:
-        f.write(text)
-        if not text.endswith("\n"):
-            f.write("\n")
-
-
-def summarize_memory_value(value: Any, max_len: int = 240) -> str:
-    if isinstance(value, str):
-        if len(value) > max_len:
-            return value[: max_len - 20] + f"... (truncated, len={len(value)})"
-        return value
-
-    if isinstance(value, (dict, list)):
-        try:
-            serialized = json.dumps(value, ensure_ascii=False)
-        except Exception:
-            serialized = str(value)
-        if len(serialized) > max_len:
-            return serialized[: max_len - 20] + f"... (truncated, len={len(serialized)})"
-        return serialized
-
-    return str(value)
-
-
-def summarize_tool_result(result: Any) -> str:
-    if isinstance(result, dict):
-        status = result.get("status")
-        content = result.get("content")
-        content_summary = summarize_memory_value(content, max_len=200)
-        extra_items = [
-            f"{k}={summarize_memory_value(v, max_len=80)}"
-            for k, v in result.items()
-            if k not in {"status", "content"}
-        ]
-        extra_text = f" | {', '.join(extra_items)}" if extra_items else ""
-        return f"status={status}{extra_text}\nContent: {content_summary}"
-    return summarize_memory_value(result)
 
 
 def build_bottom_toolbar_text() -> str:
@@ -173,7 +110,6 @@ TRANSLATIONS = {
     "device_os": {"zh": "当前操作系统信息：", "en": "Current operating system info:"},
     "device_software": {"zh": "当前设备软件环境信息：", "en": "Current software environment info:"},
     "device_workdir": {"zh": "当前工作目录：", "en": "Current working directory:"},
-    "invalid_tool_args": {"zh": "工具参数不是有效 JSON，原始内容：%s", "en": "Tool arguments are not valid JSON. Raw content: %s"},
     "config_header": {"zh": "配置字段说明：", "en": "Configuration field descriptions:"},
     "config_file_read_error": {"zh": "配置文件读取失败，请检查 {path}: {error}", "en": "Failed to read config file. Please check {path}: {error}"},
     "config_file_format_error": {"zh": "配置文件格式不正确，期望 JSON 对象: {path}", "en": "Config file format is invalid. Expected a JSON object: {path}"},
@@ -182,73 +118,50 @@ TRANSLATIONS = {
     "mcp_discover_failed": {"zh": "发现 MCP 工具失败", "en": "Failed to discover MCP tools"},
     "mcp_tool_not_found": {"zh": "未找到 MCP 工具对应的服务配置: {name}", "en": "No MCP server configuration found for tool: {name}"},
     "mcp_tool_unavailable": {"zh": "MCP 工具不可用：{name}，已忽略。", "en": "MCP tool unavailable: {name}; it will be ignored."},
-    "mcp_tool_failed": {"zh": "执行 MCP 工具失败", "en": "Failed to execute MCP tool"},
     "tool_missing_arg": {"zh": "{name} 缺少 {arg} 参数。", "en": "{name} is missing the {arg} argument."},
     "unknown_tool": {"zh": "未知工具: {name}", "en": "Unknown tool: {name}"},
-    "start_model_call": {"zh": "开始调用模型", "en": "Starting model call"},
     "model_request_params": {"zh": "调试-模型请求参数", "en": "Debug - model request parameters"},
-    "model_call_finished": {"zh": "调用模型结束", "en": "Model call finished"},
     "model_raw_response": {"zh": "调试-模型原始返回", "en": "Debug - raw model response"},
     "cancelled": {"zh": "已取消", "en": "Cancelled"},
     "model_cancelled": {"zh": "用户中断了当前模型调用。", "en": "The current model call was interrupted by the user."},
-    "model_error": {"zh": "调用模型时出错", "en": "Error while calling the model"},
     "model_quota_error": {"zh": "模型调用失败：检测到配额/限流问题（可能是免费额度已耗尽或未开通付费）。\n请检查配置中的 api_key 与 base_url，或开通/充值服务后重试。", "en": "Model call failed: quota or rate-limit issue detected (the free quota may be exhausted or billing may not be enabled).\nPlease check the api_key and base_url in the config, or enable/top up the service and try again."},
     "model_502_error": {"zh": "模型调用失败：上游模型服务返回了 502（Bad Gateway）或服务端异常。\n这通常是模型服务端暂时不可用、代理转发异常或服务正在重启造成的。\n请稍后重试，并确认 base_url 指向的是可正常提供 /chat/completions 的服务。", "en": "Model call failed: the upstream model service returned 502 (Bad Gateway) or a server-side error.\nThis is usually caused by a temporary outage, proxy forwarding issue, or service restart.\nPlease try again later and confirm that base_url points to a service that serves /chat/completions correctly."},
     "model_call_failed": {"zh": "模型调用失败：{error}", "en": "Model call failed: {error}"},
     "tool_result_title": {"zh": "工具调用结果", "en": "Tool execution result"},
+    "agent_reply_title": {"zh": "agent 回复", "en": "Agent reply"},
     "config_error_title": {"zh": "配置错误", "en": "Configuration error"},
     "quota_hint": {"zh": "免费额度", "en": "free quota"},
-    "tool_execution": {"zh": "开始执行工具：{name}，参数：{args}", "en": "Starting tool execution: {name}, args: {args}"},
-    "tool_subprocess_failed": {"zh": "子进程启动失败，cwd=%s，回退到 %s: %s", "en": "Failed to start subprocess in cwd=%s, falling back to %s: %s"},
     "welcome_message": {
-        "zh": "输入:\n/exit 退出，\n/clear 清空本地会话，\n/task-start 开始任务上下文，\n/task-end 生成最终提示。\nCtrl+C 可中断当前执行（提示符下再按一次退出）。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\npython main.py --reset-session\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-amc / --agent-messages-count：历史消息数量(默认: 12)\n-rd / --request-delay：请求间隔秒数(默认: 3)\n-hc / --history-count：会话轮次数量(默认: 6)\n-np / --no-plan：跳过执行前的任务规划\n--reset-session：重置本地会话记录。",
-        "en": "Input:\n/exit to exit,\n/clear to clear the local session,\n/task-start to start a task context,\n/task-end to generate the final prompt.\nCtrl+C can interrupt the current execution (press it twice at the prompt to exit).\n\nStartup command examples:\npython main.py -l zh\npython main.py -t \"your task\" -d ./workspace -l en\npython main.py --reset-session\n\nOptions:\n-t / --task: one-off task content\n-d / --workdir: specify the working directory\n-l / --lang: choose language (zh / en)\n-amc / --agent-messages-count: number of messages to keep in agent history (default: 12)\n-rd / --request-delay: delay in seconds between model requests (default: 3)\n-hc / --history-count: number of rounds to keep in conversation history (default: 6)\n-np / --no-plan: skip the planning step before executing a request\n--reset-session: reset the local session history."
+        "zh": "输入:\n/exit 退出，\n/clear 清空当前会话，\nCtrl+C 可中断当前执行（提示符下再按一次退出）。\n\n启动命令示例：\npython main.py -l zh\npython main.py -t \"你的任务\" -d ./workspace -l en\n\n参数说明：\n-t / --task：一次性任务内容\n-d / --workdir：指定工作目录\n-l / --lang：选择语言（zh / en）\n-rd / --request-delay：请求间隔秒数(默认: 3)\n\n对话上下文仅保存在内存中，最多保留最近 50 轮，程序退出后即清空。",
+        "en": "Input:\n/exit to exit,\n/clear to clear the current session,\nCtrl+C can interrupt the current execution (press it twice at the prompt to exit).\n\nStartup command examples:\npython main.py -l zh\npython main.py -t \"your task\" -d ./workspace -l en\n\nOptions:\n-t / --task: one-off task content\n-d / --workdir: specify the working directory\n-l / --lang: choose language (zh / en)\n-rd / --request-delay: delay in seconds between model requests (default: 3)\n\nThe conversation context is kept in memory only, capped at the last 50 rounds, and is cleared when the program exits."
     },
     "startup_title": {"zh": "启动", "en": "Start"},
     "exit_message": {"zh": "已退出。", "en": "Exited."},
     "bye_message": {"zh": "再见。", "en": "Goodbye."},
-    "clear_session_message": {"zh": "会话记录与最近对话记录已清空。", "en": "Session history and recent conversation history have been cleared."},
+    "clear_session_message": {"zh": "内存中的会话记录已清空。", "en": "In-memory conversation history has been cleared."},
     "workdir_message": {"zh": "工作目录: {path}", "en": "Working directory: {path}"},
     "cli_config_title": {"zh": "Cli 配置", "en": "CLI configuration"},
     "mcp_connected": {"zh": "已接入 MCP 工具：{count} 个", "en": "Connected MCP tools: {count}"},
     "mcp_config_title": {"zh": "MCP 配置", "en": "MCP configuration"},
-    "session_reset_message": {"zh": "会话记录已重置。", "en": "Session history has been reset."},
     "debug_enabled_message": {"zh": "调试模式已开启，会输出模型请求参数与原始返回内容。", "en": "Debug mode is enabled; model request parameters and raw responses will be shown."},
     "debug_config_title": {"zh": "调试配置", "en": "Debug configuration"},
     "task_cancelled": {"zh": "已取消当前任务。", "en": "The current task has been cancelled."},
     "interrupted_title": {"zh": "已中断", "en": "Interrupted"},
     "runtime_error_title": {"zh": "运行时错误", "en": "Runtime error"},
     "tool_execution_error": {"zh": "工具执行错误", "en": "Tool execution error"},
-    "task_end_error": {"zh": "Task End 错误", "en": "Task End error"},
-    "task_end_notice": {"zh": "Task End 提示", "en": "Task End notice"},
-    "task_end_file_missing": {"zh": "未找到对话记录文件：{path}", "en": "Conversation history file not found: {path}"},
-    "task_end_empty": {"zh": "对话记录为空或格式不正确。", "en": "Conversation history is empty or malformed."},
-    "task_end_no_task_start": {"zh": "未在 recent_conversations.md 中找到包含 /task-start 的轮次。", "en": "No round containing /task-start was found in recent_conversations.md."},
-    "task_end_generate_failed": {"zh": "生成失败", "en": "Generation failed"},
-    "task_end_no_prompt": {"zh": "模型未返回任何最终提示。", "en": "The model did not return a final prompt."},
-    "task_end_result": {"zh": "生成结果", "en": "Generation result"},
-    "task_end_completed": {"zh": "已生成最终提示并写入: {path}", "en": "Final prompt generated and written to: {path}"},
-    "task_end_done": {"zh": "Task End 完成", "en": "Task End complete"},
     "starting_tool_call": {"zh": "开始调用工具", "en": "Starting tool call"},
     "current_tool_cancelled": {"zh": "已取消当前工具执行。", "en": "The current tool execution has been cancelled."},
     "cli_parser_description": {"zh": "Prompt Copilot CLI 编程 Agent", "en": "Prompt Copilot CLI coding agent"},
     "task_argument_help": {"zh": "一次性任务内容，适合单次执行。", "en": "One-off task content, suitable for a single run."},
     "workdir_argument_help": {"zh": "工作目录。", "en": "Working directory."},
-    "reset_session_help": {"zh": "重置本地持久化会话记录。", "en": "Reset local persisted session history."},
+    "bare_argument_help": {"zh": "精简模式：不向上下文注入系统提示词与 function-calling 工具定义。", "en": "Bare mode: do not inject the system prompt or function-calling tool definitions into the context."},
     "prompt_placeholder": {"zh": "你想让我做什么？> ", "en": "What do you want me to do? > "},
-    "toolbar_help": {"zh": "可用命令: /exit /clear /task-start /task-end  | Tab 补全 | Ctrl+C 可中断当前执行", "en": "Available commands: /exit /clear /task-start /task-end | Tab completion | Ctrl+C can interrupt the current execution"},
+    "toolbar_help": {"zh": "可用命令: /exit /clear  | Tab 补全 | Ctrl+C 可中断当前执行", "en": "Available commands: /exit /clear | Tab completion | Ctrl+C can interrupt the current execution"},
     "ctrl_c_hint": {"zh": "已清空当前输入；再按一次 Ctrl+C 退出。", "en": "Current input cleared; press Ctrl+C again to exit."},
-    "no_plan_help": {"zh": "跳过执行前的任务规划步骤。", "en": "Skip the planning step before executing a user request."},
     "token_usage_label": {"zh": "累计 token", "en": "Cumulative tokens"},
     "prompt_tokens_label": {"zh": "prompt", "en": "prompt"},
     "completion_tokens_label": {"zh": "completion", "en": "completion"},
     "total_tokens_label": {"zh": "total", "en": "total"},
-    "token_usage_unavailable": {"zh": "无 token 使用信息", "en": "No token usage information"},
-    "context_size_label": {"zh": "提交上下文大小", "en": "Submitted context size"},
-    "response_length_label": {"zh": "回复内容长度", "en": "Response content length"},
-    "recent_conversations_header": {"zh": "# 最近对话记录", "en": "# Recent conversations"},
-    "task_end_generation_failed_log": {"zh": "调用模型生成最终提示失败", "en": "Failed to generate the final prompt with the model"},
-    "final_prompt_header": {"zh": "# 最终提示词", "en": "# Final prompt"},
 }
 
 
@@ -259,9 +172,7 @@ def t(key: str, **kwargs: Any) -> str:
         return text.format(**kwargs)
     return text
 
-MEMORY_FILE_PATH = ROOT / "memory.md"
-
-DEFAULT_SYSTEM_PROMPT = f"""
+DEFAULT_SYSTEM_PROMPT = """
 你是一个基于 CLI 的编程 Agent，你的名字是 Jason Li，专注于使用文件、命令、Python 脚本等工具完成开发任务。
 
 工作原则：
@@ -270,34 +181,28 @@ DEFAULT_SYSTEM_PROMPT = f"""
 3、所有代码文件生成、编辑、删除等操作均在工作目录中执行。如果用户没有指定具体目录，默认工作目录为工程的根目录。
 4、如果需要，输出简洁的说明与下一步建议。
 5、若涉及删除系统文件或执行危险命令，必须先向用户确认后方可执行。
-6、当用户输入指令：/task-start 的时候,直接回复：请输入你的第一条初始提示。
-7、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。
-8、记忆文件 {MEMORY_FILE_PATH} 持久化存储了所有任务处理记录（含工具调用详情），当需要回溯历史上下文时，可以主动读取该文件。
-9、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
-10、如果用户想“查看图片内容”，应优先调用图片读取工具。
-11、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时执行每个步骤的时候明确说明当前环节与进度，实时反馈任务状态。
-12、使用 execute_python_script 时按命令类型区分处理：若是 ls、pytest、build 等短命令，脚本内用 subprocess.run 显式设置 timeout 同步执行即可；若是 npm run dev、flask run 等常驻服务或任何不会自行退出的进程，一律使用 background=true 参数（见第 15 条）让工具脱离终端后台启动并立即返回 PID 与日志路径，脚本内只负责启动后打印就绪标志即可，严禁在脚本内同步阻塞或自行 Popen 后 sys.exit() 模拟后台。
-13、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
-14、常驻/长驻进程一律通过 execute_python_script 的 background=true 启动（工具内部已按平台脱离终端：Linux/Mac 用 start_new_session=True，Windows 用 creationflags=CREATE_NEW_PROCESS_GROUP），无需在脚本内自行 Popen；仅当你确需在脚本内手动脱离终端启动子进程时，才需自行设置上述跨平台参数。
-15、启动网络服务/服务器（如 web server、npm run dev、flask run 等长驻进程）时，优先使用 execute_python_script 的 background=true 参数：让工具以 detached 方式启动并立即返回 PID 与日志路径，你随后读取日志文件确认启动就绪（如出现端口监听、监听地址、健康检查通过等标志），或访问健康检查 URL 验证，再继续下一步；不要在脚本内同步阻塞等待服务退出。
-16、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），一律使用 background=true 让工具后台启动并立即返回 PID 与日志路径，禁止在脚本内同步阻塞等待完成；随后通过读取日志文件监控进度（脚本内应定期写入心跳/进度），若发现任务完成或长时间无进度更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
-17、如果需要搜索互联网信息时候优先使用中国国内搜索引擎优先，例如：bing、百度等。
-18、所有生成的代码及网络检索内容均统一优先使用 UTF-8 编码。
+6、遇到信息盲区时，严禁主观臆测，请优先使用搜索工具补齐信息缺口，确保回答精准有据。
+7、如果用户想“读取/识别其他二进制文件”，你必须明确告知：我无法直接读取或理解通用二进制文件内容。
+8、如果用户想“查看图片内容”，应优先调用图片读取工具。
+9、当用户输入一条任务指令时，如果是详细的任务清单，你就理解用户要求逐步完成工作，同时执行每个步骤的时候明确说明当前环节与进度，实时反馈任务状态。
+10、使用 execute_python_script 时按命令类型区分处理：若是 ls、pytest、build 等短命令，脚本内用 subprocess.run 显式设置 timeout 同步执行即可；若是 npm run dev、flask run 等常驻服务或任何不会自行退出的进程，一律使用 background=true 参数（见第 13 条）让工具脱离终端后台启动并立即返回 PID 与日志路径，脚本内只负责启动后打印就绪标志即可，严禁在脚本内同步阻塞或自行 Popen 后 sys.exit() 模拟后台。
+11、无法调用官方联网检索工具而通过脚本抓取网络内容时需区分数据类型处理，抓取普通网页文本需剔除 HTML 标签、样式代码、广告碎片、无效注释、多余空行等冗余内容，仅留存有效正文且文本超出 8000 字符则截断，文本输出上限为 8000 字符，抓取程序源代码则无需过滤，完整保留原始代码、自带注释、缩进换行与原有格式，代码输出无字符数量限制。
+12、常驻/长驻进程一律通过 execute_python_script 的 background=true 启动（工具内部已按平台脱离终端：Linux/Mac 用 start_new_session=True，Windows 用 creationflags=CREATE_NEW_PROCESS_GROUP），无需在脚本内自行 Popen；仅当你确需在脚本内手动脱离终端启动子进程时，才需自行设置上述跨平台参数。
+13、启动网络服务/服务器（如 web server、npm run dev、flask run 等长驻进程）时，优先使用 execute_python_script 的 background=true 参数：让工具以 detached 方式启动并立即返回 PID 与日志路径，你随后读取日志文件确认启动就绪（如出现端口监听、监听地址、健康检查通过等标志），或访问健康检查 URL 验证，再继续下一步；不要在脚本内同步阻塞等待服务退出。
+14、凡耗时不可控的超长任务（如大文件下载、模型训练、全量测试、复杂构建等），一律使用 background=true 让工具后台启动并立即返回 PID 与日志路径，禁止在脚本内同步阻塞等待完成；随后通过读取日志文件监控进度（脚本内应定期写入心跳/进度），若发现任务完成或长时间无进度更新，必须主动调用系统命令（如 kill -9 PID）清理后台进程以防孤儿进程耗尽资源；仅在任务自身支持超时参数或耗时可预估时，方可在脚本内同步执行并设合理 timeout_seconds。
+15、如果需要搜索互联网信息时候优先使用中国国内搜索引擎优先，例如：bing、百度等。
+16、所有生成的代码及网络检索内容均统一优先使用 UTF-8 编码。
 
 """
 
 UI_SYSTEM_LANGUAGE = "en"
-APPLICATION_VERSION = "0.7.0"
+APPLICATION_VERSION = "0.8.0"
 WORKSPACE_DIR = ROOT / "workspace"
-LOG_DIR = ROOT / "logs"
-LOG_FILE = LOG_DIR / "agent_runtime.log"
-DEFAULT_MAX_CHAT_COUNT = 6
-CHAT_MESSAGE_MAX_COUNT = 12
 CONFIG_SAVE_FILE_PATH = ROOT / "config.json"
 RE_ACTION_DELAY = 3 # unit: seconds
 TOOL_SUBPROCESS_TIMEOUT = 6 * 60  # 6 minutes in seconds
 MAX_AGENT_ITERATIONS = 50
-PLANNING_MIN_INPUT_LENGTH = 16  # skip the planning call for very short/simple inputs
+MAX_CHAT_ROUNDS = 50  # hard cap: conversation rounds kept in the in-memory history
 MAX_READ_FILE_BYTES = 5 * 1024 * 1024  # refuse to read files larger than 5 MB
 MAX_READ_FILE_CHARS = 100_000  # truncate longer text before it enters the context
 MAX_SEARCH_FILE_BYTES = 1_000_000  # skip files larger than 1 MB when searching
@@ -309,6 +214,7 @@ IGNORED_DIR_NAMES = {
 MCP_SESSION_START_TIMEOUT = 120  # generous budget for slow npx cold starts
 MCP_TOOL_CALL_TIMEOUT = 300  # per tool invocation timeout
 MODEL_REQUEST_TIMEOUT_SECONDS = 600  # generous timeout for slower model generations
+BARE_MODE: bool = False  # -b/--bare: do not inject the system prompt or function-calling tool definitions into the context
 DEFAULT_MODEL_CONFIG: dict[str, Any] = {
     "model": "",
     "base_url": "",
@@ -346,14 +252,17 @@ def _get_config_field_descriptions() -> dict[str, str]:
 
 console = Console()
 
-logger = logging.getLogger("cli_agent")
-logger.setLevel(logging.INFO)
-logger.propagate = False
-if not logger.handlers:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(file_handler)
+
+def print_section(content: str, title: str = "") -> None:
+    """Print content under a dashed title separator instead of a boxed frame.
+
+    Boxed output is hard to select and copy from the terminal, so sections are
+    delimited with a plain `-------- 标题 --------` line followed by the body.
+    """
+    console.print()
+    if title:
+        console.print(f"{'-' * 18} {title} {'-' * 18}")
+    console.print(content, highlight=False)
 
 _builtin_tool_definitions_cache: list[dict[str, Any]] | None = None
 
@@ -619,14 +528,7 @@ _mcp_manager = MCPManager()
 def ACTIVE_MCP_TOOL_DEFINITIONS() -> list[dict[str, Any]]:
     return _mcp_manager.tool_definitions
 
-def ACTIVE_MCP_TOOL_CONFIG() -> dict[str, Any]:
-    return _mcp_manager.tool_config
 
-def ACTIVE_MCP_TOOL_CONFIGS() -> list[dict[str, Any]]:
-    return _mcp_manager.tool_configs
-
-def ACTIVE_MCP_TOOL_SERVER_BY_NAME() -> dict[str, dict[str, Any]]:
-    return _mcp_manager.server_by_name
 INTERRUPTION_REQUESTED = False
 
 
@@ -646,27 +548,19 @@ def reset_interruption_state() -> None:
     INTERRUPTION_REQUESTED = False
 
 
-class SessionStore:
-    def __init__(self, session_file: Path, max_messages: int = DEFAULT_MAX_CHAT_COUNT):
-        self.session_file = session_file
-        self.max_messages = max_messages
-        self.session_file.parent.mkdir(parents=True, exist_ok=True)
-        if not self.session_file.exists():
-            self.session_file.write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+# In-memory conversation history shared across the session (no persistence).
+# Each round contributes one user message and one assistant message.
+CONVERSATION_HISTORY: list[dict[str, Any]] = []
 
-    def load(self) -> list[dict[str, Any]]:
-        try:
-            data = json.loads(self.session_file.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
-        return []
 
-    def save(self, history: list[dict[str, Any]]) -> None:
-        if len(history) > self.max_messages:
-            history = history[-self.max_messages:]
-        self.session_file.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+def reset_conversation_history() -> None:
+    CONVERSATION_HISTORY.clear()
+
+
+def _trim_conversation_history() -> None:
+    max_messages = MAX_CHAT_ROUNDS * 2
+    if len(CONVERSATION_HISTORY) > max_messages:
+        del CONVERSATION_HISTORY[:-max_messages]
 
 
 class SlashCommandCompleter(Completer):
@@ -734,7 +628,6 @@ def safe_parse_tool_args(raw_arguments: Any) -> dict[str, Any]:
             parsed = json.loads(raw_arguments)
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
-            logger.warning(t("invalid_tool_args"), raw_arguments)
             return {}
     return {}
 
@@ -1288,8 +1181,7 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
             try:
                 tools = _mcp_pool.list_tools(server_config)
             except Exception:
-                logger.exception(t("mcp_discover_failed") + f", server={server_config.get('name')}")
-                console.print(Panel.fit(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed")))
+                print_section(t("mcp_tool_unavailable", name=server_config.get("name") or str(server_config)), title=t("mcp_discover_failed"))
                 continue
             discovered = [normalize_mcp_tool_definition(tool) for tool in tools.tools]
             definitions.extend(discovered)
@@ -1298,10 +1190,8 @@ def discover_mcp_tools(model_cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 _mcp_manager.server_by_name[item["function"]["name"]] = server_config
 
         _mcp_manager.set_tools(definitions, active_configs)
-        logger.info("Discovered MCP tool definitions: %s", [item["function"]["name"] for item in definitions])
         return definitions
     except Exception:
-        logger.exception(t("mcp_discover_failed"))
         _mcp_manager.clear()
         return []
 
@@ -1316,7 +1206,6 @@ def run_mcp_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         # new server process (e.g. npx) for every single tool invocation.
         return _mcp_pool.call_tool(server_config, name, arguments)
     except Exception:
-        logger.exception(t("mcp_tool_failed") + f", tool={name}")
         return {"status": "error", "content": traceback.format_exc()}
 
 
@@ -1330,7 +1219,6 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
             dangerous = [';', '&', '|', '`', '$(', '&&', '||']
             for d in dangerous:
                 if d in command:
-                    logger.warning("Potentially dangerous shell command blocked: %s", command)
                     raise ValueError(f"Shell command contains forbidden pattern: {d}")
         else:
             raise ValueError("When shell=True, command must be a string")
@@ -1357,7 +1245,6 @@ def run_subprocess_command(command: Any, cwd: str, shell: bool = False, timeout:
     try:
         proc = subprocess.Popen(command, shell=shell, **popen_kwargs)
     except (FileNotFoundError, NotADirectoryError, OSError) as exc:
-        logger.warning(t("tool_subprocess_failed"), cwd, safe_cwd, exc)
         # Remove any cwd already present in popen_kwargs to avoid duplicate keyword.
         popen_kwargs.pop("cwd", None)
         proc = subprocess.Popen(command, cwd=str(Path.cwd()), shell=shell, **popen_kwargs)
@@ -1448,7 +1335,6 @@ def run_subprocess_background(
         proc = subprocess.Popen(command, shell=shell, **popen_kwargs)
     except Exception as exc:
         log_file.close()
-        logger.warning("background start failed: %s", exc)
         return {
             "status": "error",
             "content": f"Failed to start background process: {exc}",
@@ -1487,7 +1373,6 @@ def run_subprocess_background(
         }
 
     # Keep the file handle open so the log keeps capturing output.
-    logger.info("Background process started pid=%s log=%s", proc.pid, log_path)
     return {
         "status": "running",
         "pid": proc.pid,
@@ -1530,7 +1415,6 @@ def _walk_tree(root: Path, ignore_names: set[str], max_entries: int) -> list[str
 def _tool_read_file(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("read_file missing path argument, raw args: %s", args)
         return _tool_error("read_file", "path")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1564,7 +1448,6 @@ def _tool_read_file(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_write_file(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("write_file missing path argument, raw args: %s", args)
         return _tool_error("write_file", "path")
     content = args.get("content", "")
     path, error = resolve_tool_path(file_path, "path")
@@ -1581,7 +1464,6 @@ def _tool_write_file(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_delete_file(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("delete_file missing path argument, raw args: %s", args)
         return _tool_error("delete_file", "path")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1598,7 +1480,6 @@ def _tool_delete_file(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_create_directory(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("create_directory missing path argument, raw args: %s", args)
         return _tool_error("create_directory", "path")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1613,7 +1494,6 @@ def _tool_create_directory(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_delete_directory(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("delete_directory missing path argument, raw args: %s", args)
         return _tool_error("delete_directory", "path")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1631,7 +1511,6 @@ def _tool_rename_path(args: dict[str, Any]) -> dict[str, Any]:
     old_path = args.get("old_path")
     new_path = args.get("new_path")
     if not old_path or not new_path:
-        logger.error("rename_path missing arguments, raw args: %s", args)
         return _tool_error("rename_path", "old_path/new_path")
     old, error = resolve_tool_path(old_path, "old_path")
     if error:
@@ -1653,7 +1532,6 @@ def _tool_copy_file(args: dict[str, Any]) -> dict[str, Any]:
     source_path = args.get("source_path")
     destination_path = args.get("destination_path")
     if not source_path or not destination_path:
-        logger.error("copy_file missing arguments, raw args: %s", args)
         return _tool_error("copy_file", "source_path/destination_path")
     source, error = resolve_tool_path(source_path, "source_path")
     if error:
@@ -1674,7 +1552,6 @@ def _tool_copy_file(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_read_image_as_base64(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("read_image_as_base64 missing path argument, raw args: %s", args)
         return _tool_error("read_image_as_base64", "path")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1687,7 +1564,6 @@ def _tool_read_image_as_base64(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_list_dir(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     if not file_path:
-        logger.error("list_dir missing path argument, raw args: %s", args)
         return _tool_error("list_dir", "path")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1712,7 +1588,6 @@ def _tool_search_code(args: dict[str, Any]) -> dict[str, Any]:
     file_path = args.get("path") or args.get("file_path")
     pattern = args.get("pattern")
     if not file_path or not pattern:
-        logger.error("search_code missing arguments, raw args: %s", args)
         return _tool_error("search_code", "path/pattern")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1765,7 +1640,6 @@ def _tool_edit_file(args: dict[str, Any]) -> dict[str, Any]:
     old_string = args.get("old_string")
     new_string = args.get("new_string")
     if not file_path or old_string is None or new_string is None:
-        logger.error("edit_file missing arguments, raw args: %s", args)
         return _tool_error("edit_file", "path/old_string/new_string")
     path, error = resolve_tool_path(file_path, "path")
     if error:
@@ -1802,7 +1676,6 @@ def _tool_edit_file(args: dict[str, Any]) -> dict[str, Any]:
 def _tool_execute_python_script(args: dict[str, Any]) -> dict[str, Any]:
     script = args.get("script")
     if not script:
-        logger.error("execute_python_script missing script argument, raw args: %s", args)
         return _tool_error("execute_python_script", "script")
     cwd = resolve_execution_cwd(args.get("cwd"), Path.cwd())
 
@@ -1887,19 +1760,15 @@ def execute_tool_call(tool_call: Any) -> dict[str, Any]:
     name = getattr(tool_call.function, "name", "")
     args = safe_parse_tool_args(getattr(tool_call.function, "arguments", {}))
     ensure_not_interrupted()
-    logger.info(t("tool_execution", name=name, args=args))
 
     handler = BUILTIN_TOOL_HANDLERS.get(name)
     if handler is not None:
         result = handler(args)
     elif name in {item["function"]["name"] for item in ACTIVE_MCP_TOOL_DEFINITIONS()}:
-        logger.info("Executing MCP tool: %s, args: %s", name, args)
         return run_mcp_tool(name, args)
     else:
-        logger.error("Unknown tool call: %s", name)
         return {"status": "error", "content": t("unknown_tool", name=name)}
 
-    logger.info("%s result: %s", name, summarize_tool_result(result))
     return result
 
 
@@ -1942,18 +1811,16 @@ def show_stage(title: str, content: str) -> None:
         except Exception:
             # If it's not valid JSON, leave it as-is
             pass
-    console.print(Panel.fit(content, title=title))
+    print_section(content, title=title)
 
 
 def show_tool_result(tool_call: Any, result: dict[str, Any]) -> None:
     display_result = sanitize_tool_result_for_display(result)
     description = get_tool_description(tool_call)
     description_text = f"{description}\n\n" if description else ""
-    console.print(
-        Panel.fit(
-            f"[bold cyan]{tool_call.function.name}[/bold cyan]\n{description_text}{json.dumps(display_result, ensure_ascii=False, indent=2)}",
-            title=t("tool_result_title"),
-        )
+    print_section(
+        f"[bold cyan]{tool_call.function.name}[/bold cyan]\n{description_text}{json.dumps(display_result, ensure_ascii=False, indent=2)}",
+        title=t("tool_result_title"),
     )
 
 
@@ -1982,7 +1849,219 @@ def _filter_think_tags(content: str) -> str:
     return result
 
 
-def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False, disable_tools:bool = False) -> Any:
+class StreamingThinkFilter:
+    """Incrementally strip <think>...</think> blocks from streamed content.
+
+    feed() returns the portion of the accumulated buffer that is safe to display
+    (i.e. outside any think block). A trailing fragment that might still turn into
+    a think tag is held back until close() resolves it, so partial tags never leak.
+    Behavior matches _filter_think_tags: an unterminated opening tag suppresses all
+    remaining content, and self-closing <think/> tags are simply removed.
+    """
+    _OPEN_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+    _CLOSE_RE = re.compile(r"</think\s*>", re.IGNORECASE)
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._in_think = False
+        self.visible = ""
+
+    def feed(self, text: str) -> str:
+        if text:
+            self._pending += text
+        return self._drain(final=False)
+
+    def close(self) -> str:
+        return self._drain(final=True)
+
+    def _drain(self, final: bool) -> str:
+        emit = ""
+        while self._pending:
+            if self._in_think:
+                m = self._CLOSE_RE.search(self._pending)
+                if m:
+                    self._pending = self._pending[m.end():]
+                    self._in_think = False
+                    continue
+                if final:
+                    self._pending = ""
+                else:
+                    keep = self._partial_close_start(self._pending)
+                    self._pending = "" if keep is None else self._pending[keep:]
+                break
+            m = self._OPEN_RE.search(self._pending)
+            if m:
+                emit += self._pending[:m.start()]
+                if not m.group(0).endswith("/>"):
+                    self._in_think = True
+                self._pending = self._pending[m.end():]
+                continue
+            if final:
+                emit += self._pending
+                self._pending = ""
+                break
+            hold = self._potential_open_start(self._pending)
+            if hold is None:
+                emit += self._pending
+                self._pending = ""
+            else:
+                emit += self._pending[:hold]
+                self._pending = self._pending[hold:]
+            break
+        self.visible += emit
+        return emit
+
+    @staticmethod
+    def _potential_open_start(s: str) -> int | None:
+        # Index of the first '<' that could still grow into a <think...> opening tag.
+        target = "<think"
+        i = 0
+        while True:
+            j = s.find("<", i)
+            if j == -1:
+                return None
+            rest = s[j:]
+            low = rest.lower()
+            if len(low) < len(target) and target.startswith(low):
+                return j
+            if low.startswith(target):
+                after = rest[len(target):]
+                if after and (after[0].isalnum() or after[0] == "_"):
+                    i = j + 1
+                    continue
+                if ">" in after:
+                    i = j + 1
+                    continue
+                return j
+            i = j + 1
+
+    @staticmethod
+    def _partial_close_start(s: str) -> int | None:
+        # Index of a trailing fragment that could still become the </think> tag.
+        for k in range(len(s)):
+            if s[k] != "<":
+                continue
+            low = s[k:].lower()
+            if "</think".startswith(low) or re.fullmatch(r"</think\s*", low):
+                return k
+        return None
+
+
+def _extract_delta_reasoning(delta: Any) -> str:
+    for attr in ("reasoning_content", "reasoning"):
+        value = getattr(delta, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning_content", "reasoning"):
+            value = extra.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def _stream_chat_once(client: OpenAI, request_payload: dict[str, Any], request_timeout: Any, model: str, debug_enabled: bool) -> Any:
+    """Run a streaming chat completion, printing visible content as it arrives.
+
+    Reconstructs an assistant-message-like object (content, tool_calls, reasoning)
+    compatible with what the non-streaming path and run_agent expect.
+    """
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls_acc: dict[int, dict[str, Any]] = {}
+    usage: Any = None
+    think_filter = StreamingThinkFilter()
+    printed_any = False
+    reply_header_printed = False
+
+    stream = client.chat.completions.create(**request_payload, timeout=request_timeout)
+    for chunk in stream:
+        ensure_not_interrupted()
+        chunk_usage = getattr(chunk, "usage", None)
+        if chunk_usage is not None:
+            usage = chunk_usage
+            update_total_token_usage(usage)
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        delta = choices[0].delta
+
+        reasoning_piece = _extract_delta_reasoning(delta)
+        if reasoning_piece:
+            reasoning_parts.append(reasoning_piece)
+
+        content_piece = getattr(delta, "content", None)
+        if content_piece:
+            content_parts.append(content_piece)
+            visible = think_filter.feed(content_piece)
+            if visible:
+                if not reply_header_printed:
+                    console.print("\n" + f"{'-' * 18} {t('agent_reply_title')} {'-' * 18}")
+                    reply_header_printed = True
+                console.print(visible, end="", highlight=False, soft_wrap=True)
+                printed_any = True
+
+        tool_call_deltas = getattr(delta, "tool_calls", None) or []
+        for tc_delta in tool_call_deltas:
+            idx = getattr(tc_delta, "index", 0) or 0
+            slot = tool_calls_acc.setdefault(idx, {"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
+            if getattr(tc_delta, "id", None):
+                slot["id"] = tc_delta.id
+            if getattr(tc_delta, "type", None):
+                slot["type"] = tc_delta.type
+            fn = getattr(tc_delta, "function", None)
+            if fn is not None:
+                if getattr(fn, "name", None):
+                    slot["function"]["name"] += fn.name
+                if getattr(fn, "arguments", None):
+                    slot["function"]["arguments"] += fn.arguments
+
+    tail = think_filter.close()
+    if tail:
+        if not reply_header_printed:
+            console.print("\n" + f"{'-' * 18} {t('agent_reply_title')} {'-' * 18}")
+            reply_header_printed = True
+        console.print(tail, end="", highlight=False, soft_wrap=True)
+        printed_any = True
+    if printed_any:
+        console.print()
+
+    filtered_content = _filter_think_tags("".join(content_parts))
+    ordered_slots = [tool_calls_acc[k] for k in sorted(tool_calls_acc)]
+    tool_calls = [
+        SimpleNamespace(
+            id=slot["id"] or f"tool_call_{i}",
+            type=slot.get("type") or "function",
+            function=SimpleNamespace(name=slot["function"]["name"], arguments=slot["function"]["arguments"]),
+        )
+        for i, slot in enumerate(ordered_slots)
+    ]
+
+    assistant_message = SimpleNamespace()
+    assistant_message.content = filtered_content
+    assistant_message.tool_calls = tool_calls
+    reasoning_text = "".join(reasoning_parts)
+    assistant_message.reasoning = reasoning_text
+    assistant_message.reasoning_content = reasoning_text
+    assistant_message.content_reasoning = ""
+    assistant_message.streamed = printed_any
+
+    if debug_enabled:
+        debug_dump = {
+            "content": filtered_content,
+            "reasoning": reasoning_text,
+            "tool_calls": [
+                {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ],
+        }
+        show_stage(t("model_raw_response"), json.dumps(debug_dump, ensure_ascii=False, indent=2))
+
+    return assistant_message
+
+
+def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temperature: float, debug_enabled: bool = False, disable_tools:bool = False, stream_display: bool = False) -> Any:
     ensure_not_interrupted()
     wait_for_model_call_interval()
     tool_definitions = get_tool_definitions()
@@ -2007,14 +2086,15 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
     if request_timeout is None:
         request_timeout = MODEL_REQUEST_TIMEOUT_SECONDS
 
-    context_payload = json.dumps(request_payload, ensure_ascii=False)
-    context_size_chars = len(context_payload)
-    context_size_bytes = len(context_payload.encode("utf-8"))
-    show_stage(t("start_model_call"), f"model={model}\nmessages={len(messages)}\n{t('context_size_label')}={context_size_chars} chars / {context_size_bytes} bytes")
     if debug_enabled:
         show_stage(t("model_request_params"), json.dumps(request_payload, ensure_ascii=False, indent=2))
 
     try:
+        if stream_display:
+            request_payload["stream"] = True
+            request_payload["stream_options"] = {"include_usage": True}
+            return _stream_chat_once(client, request_payload, request_timeout, model, debug_enabled)
+
         response = client.chat.completions.create(**request_payload, timeout=request_timeout)
         assistant_message = response.choices[0].message
         usage = getattr(response, "usage", None)
@@ -2028,30 +2108,21 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
             assistant_message.content = response_content
         except Exception:
             pass
-        response_length = len(str(response_content))
-        usage_summary = format_usage_summary(usage)
-        show_stage(
-            t("model_call_finished"),
-            f"model={model}\nresponse_type={type(assistant_message).__name__}\n{t('response_length_label')}={response_length}\n{t('token_usage_label')}={usage_summary}",
-        )
         if debug_enabled:
             raw_response = response.model_dump_json(indent=2)
             show_stage(t("model_raw_response"), raw_response)
 
         return assistant_message
     except KeyboardInterrupt:
-        logger.info("Model call interrupted by user")
         show_stage(t("cancelled"), t("model_cancelled"))
         raise
     except (APITimeoutError, TimeoutError):
-        logger.error("Model call timed out")
         assistant_message = SimpleNamespace()
         assistant_message.tool_calls = []
         assistant_message.content = "Model call timed out. Please try again."
         assistant_message.is_error = True
         return assistant_message
     except Exception as exc:
-        logger.exception(t("model_error"))
         err_text = str(exc)
         exc_name = type(exc).__name__
         status_code = getattr(exc, "status_code", None)
@@ -2074,49 +2145,6 @@ def chat_once(client: OpenAI, model: str, messages: list[dict[str, Any]], temper
         return assistant_message
     finally:
         mark_model_call_completed()
-
-
-class ConversationRecorder:
-    def __init__(self, md_path: Path, max_rounds: int = 50):
-        self.md_path = md_path
-        self.max_rounds = max_rounds
-        # ensure file exists
-        self.md_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.md_path.exists():
-            self.md_path.write_text(t("recent_conversations_header") + "\n\n", encoding="utf-8")
-
-    def _append(self, text: str) -> None:
-        # Append text to the file
-        with self.md_path.open("a", encoding="utf-8") as f:
-            f.write(text)
-        self._trim_rounds()
-
-    def _trim_rounds(self) -> None:
-        # Keep only the last self.max_rounds rounds (based on '## Round' headings)
-        content = self.md_path.read_text(encoding="utf-8")
-        parts = content.split("\n## Round ")
-        if len(parts) <= self.max_rounds + 1:
-            return
-        # parts[0] is header before first round
-        header = parts[0]
-        rounds = parts[1:]
-        keep = rounds[-self.max_rounds :]
-        new_content = header + "\n## Round " + "\n## Round ".join(keep)
-        self.md_path.write_text(new_content, encoding="utf-8")
-
-    def start_round(self, user_text: str) -> None:
-        ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        header = f"\n## Round {ts}\n\n"
-        user_block = f"**User:**\n\n{user_text}\n\n"
-        self._append(header + user_block)
-
-    def record_assistant(self, assistant_text: str) -> None:
-        block = f"**Assistant:**\n\n{assistant_text}\n\n"
-        self._append(block)
-
-    def record_error(self, error_text: str) -> None:
-        block = f"**Error:**\n\n{error_text}\n\n"
-        self._append(block)
 
 
 def to_tool_call_objects(tool_calls: list[Any]) -> list[Any]:
@@ -2184,50 +2212,6 @@ def parse_tool_calls_from_content(content: str | None) -> list[Any]:
     return decoded_calls
 
 
-def plan_user_request(client: OpenAI, model: str, history: list[dict[str, Any]], user_text: str, debug_enabled: bool = False) -> str:
-    if is_special_command(user_text):
-        return user_text
-
-    planning_prompt = f"""
-你是一个编程行业需求分析专家，你能够通过历史上下文和用户的输入分析出用户的真实意图，能够拆分步骤，并且能够生成任务执行清单。
-记忆文件 {MEMORY_FILE_PATH} 持久化存储了所有任务处理记录（含工具调用详情），当需要回溯历史上下文时，可以主动读取该文件。
-
-### 请严格按照以下格式输出任务清单：
-
-用户原始输入：......
-
-接下来按步骤逐步执行完成任务：
-1、第一步：......
-2、第二步：......
-......
-
-"""
-
-    user_prompt = f"""请结合历史上下文分析用户输入并生成任务清单。
-### 历史上下文:
-{json.dumps(history, ensure_ascii=False)}
-
-### 用户输入:
-{user_text}
-"""
-
-    planning_messages = [
-        {"role": "system", "content": planning_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    assistant_message = chat_once(client, model, planning_messages, temperature=0.2, debug_enabled=debug_enabled, disable_tools=True)
-    return (assistant_message.content or "").strip() or user_text
-
-
-def is_special_command(user_text: str) -> bool:
-    normalized = (user_text or "").strip()
-    if not normalized:
-        return False
-    special_commands = {"/exit", "/clear", "/task-start", "/task-end"}
-    return normalized in special_commands
-
-
 def _trim_conversation_window(conversation: list[dict[str, Any]], max_count: int) -> list[dict[str, Any]]:
     """Keep the last max_count messages without breaking tool_calls/tool message pairs.
 
@@ -2243,31 +2227,13 @@ def _trim_conversation_window(conversation: list[dict[str, Any]], max_count: int
     return window
 
 
-def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, user_text: str, debug_enabled: bool = False, recorder: ConversationRecorder | None = None, enable_planning: bool = True) -> None:
+def run_agent(client: OpenAI, model: str, system_prompt: str, user_text: str, debug_enabled: bool = False) -> None:
     reset_interruption_state()
-    clear_task_memory_file()
-    append_task_memory_entry(f"## Task started\n\nUser request: {summarize_memory_value(user_text, max_len=240)}\n\n")
 
-    history = session_store.load()
-    planned_user_text = user_text
-    skip_planning = (
-        not enable_planning
-        or is_special_command(user_text)
-        or len(user_text.strip()) < PLANNING_MIN_INPUT_LENGTH
-    )
-    if not skip_planning:
-        try:
-            planned_user_text = plan_user_request(client, model, history, user_text, debug_enabled=debug_enabled)
-        except Exception:
-            logger.exception("Planning step failed; continuing with original user input")
-
-    append_task_memory_entry("## Task checklist\n\n" + summarize_memory_value(planned_user_text, max_len=10000) + "\n\n")
-
-    first_task_prompt = {"role": "user", "content": planned_user_text}
+    history = CONVERSATION_HISTORY
+    first_task_prompt = {"role": "user", "content": user_text}
     history.append(first_task_prompt)
-    session_store.save(history)
-    if recorder:
-        recorder.start_round(user_text)
+    _trim_conversation_history()
 
     system_prompt_message = {"role": "system", "content": system_prompt}
     messages = []
@@ -2281,45 +2247,39 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
             # Keep system prompt separate, only truncate conversation messages
             conversation_messages = _trim_conversation_window(
                 [m for m in messages if m.get("role") != "system"],
-                CHAT_MESSAGE_MAX_COUNT,
+                MAX_CHAT_ROUNDS * 2,
             )
             finalize_prompt.extend(conversation_messages)
             existing_first_prompt = first_task_prompt in conversation_messages
             if not existing_first_prompt:
                 finalize_prompt = [first_task_prompt] + finalize_prompt
-            finalize_prompt = [system_prompt_message] + finalize_prompt
-            assistant_message = chat_once(client, model, finalize_prompt, temperature=0.2, debug_enabled=debug_enabled)
+            if not BARE_MODE:
+                finalize_prompt = [system_prompt_message] + finalize_prompt
+            assistant_message = chat_once(client, model, finalize_prompt, temperature=0.2, debug_enabled=debug_enabled, disable_tools=BARE_MODE, stream_display=True)
         except KeyboardInterrupt:
-            logger.info("Current task interrupted by user")
-            console.print(Panel.fit(t("task_cancelled"), title=t("interrupted_title")))
-            if recorder:
-                recorder.record_error("User interrupted the current task")
+            print_section(t("task_cancelled"), title=t("interrupted_title"))
             return
         except Exception:
-            logger.exception("Chat request failed")
-            console.print(Panel.fit(traceback.format_exc(), title=t("runtime_error_title")))
-            if recorder:
-                recorder.record_error(traceback.format_exc())
+            print_section(traceback.format_exc(), title=t("runtime_error_title"))
             return
 
-        # A failed model call (quota/timeout/5xx) must not be persisted into the
-        # session history as if it were a genuine assistant reply.
+        # A failed model call (quota/timeout/5xx) must not be treated as a
+        # genuine assistant reply.
         if getattr(assistant_message, "is_error", False):
-            if recorder:
-                recorder.record_error(assistant_message.content or "Model call failed")
             return
 
-        tool_calls = to_tool_call_objects(list(getattr(assistant_message, "tool_calls", []) or []))
-        if not tool_calls:
+        tool_calls = [] if BARE_MODE else to_tool_call_objects(list(getattr(assistant_message, "tool_calls", []) or []))
+        if not BARE_MODE and not tool_calls:
             tool_calls = parse_tool_calls_from_content(getattr(assistant_message, "content", ""))
 
         if not tool_calls:
             answer = assistant_message.content or "I did not receive a valid reply."
             history.append({"role": "assistant", "content": answer})
-            session_store.save(history)
-            console.print(Panel.fit(answer, title="Agent reply"))
-            if recorder:
-                recorder.record_assistant(answer)
+            _trim_conversation_history()
+            # In streaming mode chat_once already printed the visible reply live, so
+            # only fall back to a panel when nothing was streamed (empty/suppressed).
+            if not getattr(assistant_message, "streamed", False):
+                print_section(answer, title=t("agent_reply_title"))
             return
 
         assistant_call_message = {
@@ -2344,10 +2304,6 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
         function_content_reasoning = getattr(assistant_message,"content_reasoning",None) or ""
         function_reasoning_content = getattr(assistant_message,"reasoning_content",None) or ""
         final_reasoning = function_reasoning.strip() or function_content_reasoning.strip() or function_content.strip() or function_reasoning_content.strip()
-        append_task_memory_entry(
-            "### The reason for the assistant to call the function\n\n"
-            f"{final_reasoning}\n\n"
-        )
 
         show_stage(t("starting_tool_call"), f"reasoning:\n{final_reasoning}")
 
@@ -2356,12 +2312,6 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                 result = execute_tool_call(tc)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
                 show_tool_result(tc, result)
-                append_task_memory_entry(
-                    "### Tool invocation\n\n"
-                    f"Tool: {tc.function.name}\n\n"
-                    f"Arguments: {summarize_memory_value(tc.function.arguments, max_len=1200)}\n\n"
-                    f"Result: {summarize_tool_result(result)}\n\n"
-                )
 
                 if tc.function.name == "read_image_as_base64":
                     try:
@@ -2375,180 +2325,24 @@ def run_agent(client: OpenAI, model: str, system_prompt: str, session_store: Ses
                             )
                             messages.append(image_message)
                     except Exception:
-                        logger.exception("Failed to append multimodal image message")
+                        pass
             except KeyboardInterrupt:
-                logger.info("Tool execution interrupted by user, tool=%s", tc.function.name)
-                console.print(Panel.fit(t("current_tool_cancelled"), title=t("interrupted_title")))
+                print_section(t("current_tool_cancelled"), title=t("interrupted_title"))
                 return
             except Exception:
-                logger.exception("Tool execution error, tool=%s", tc.function.name)
                 error_payload = {"status": "error", "content": traceback.format_exc()}
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(error_payload, ensure_ascii=False)})
-                console.print(Panel.fit(traceback.format_exc(), title=t("tool_execution_error")))
-                append_task_memory_entry(
-                    "### Tool invocation\n\n"
-                    f"Tool: {tc.function.name}\n\n"
-                    f"Arguments: {summarize_memory_value(tc.function.arguments, max_len=1200)}\n\n"
-                    f"Result: ERROR\n{summarize_tool_result(error_payload)}\n\n"
-                )
+                print_section(traceback.format_exc(), title=t("tool_execution_error"))
 
 
-def get_content_from_tool_calls(tool_calls: list) -> str:
-    """
-    Extract the `content` field from a list of tool call objects
-    (as returned by OpenAI's ChatCompletionMessage.tool_calls).
-
-    Args:
-        tool_calls: List[ChatCompletionMessageFunctionToolCall] or similar.
-                   Each item should have a `function.arguments` attribute
-                   which is a JSON string containing a dict with a `content` key.
-
-    Returns:
-        The extracted `content` string if found, otherwise an empty string ("").
-    """
-    if not tool_calls:
-        return ""
-
-    for tool_call in tool_calls:
-        try:
-            # 兼容 dict 形式（比如有些 mock / 测试数据）
-            if isinstance(tool_call, dict):
-                func = tool_call.get("function")
-                if not func:
-                    continue
-                # func 可能是 dict，也可能是有 arguments 属性的对象
-                if isinstance(func, dict):
-                    arguments_str = func.get("arguments")
-                else:
-                    arguments_str = getattr(func, "arguments", None)
-            else:
-                # OpenAI SDK 对象：ChatCompletionMessageFunctionToolCall
-                func = getattr(tool_call, "function", None)
-                if func is None:
-                    continue
-                # Function.arguments 是一个 JSON 字符串
-                arguments_str = getattr(func, "arguments", None)
-
-            if not arguments_str:
-                continue
-
-            # arguments 本身就是 JSON 字符串，需要 parse
-            if isinstance(arguments_str, str):
-                arguments = json.loads(arguments_str)
-            elif isinstance(arguments_str, dict):
-                arguments = arguments_str
-            else:
-                # 其他类型直接放弃
-                continue
-
-            # 真正取 content 字段
-            if isinstance(arguments, dict) and "content" in arguments:
-                return arguments["content"]
-
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            # 解析失败或结构异常，忽略这条 tool_call
-            continue
-
-    return ""
-
-
-def handle_task_end_command(md_path: Path, client: OpenAI, model: str, system_prompt: str, workdir: Path, debug_enabled: bool = False) -> None:
-    """Process recent_conversations.md to find the most recent /task-start and use the
-    subsequent rounds to ask the model to produce an improved prompt, then write last-prompt.md.
-    """
-    if not md_path.exists():
-        console.print(Panel.fit(t("task_end_file_missing", path=md_path), title=t("task_end_error")))
-        return
-
-    raw = md_path.read_text(encoding="utf-8")
-    parts = raw.split("\n## Round ")
-    if len(parts) <= 1:
-        console.print(Panel.fit(t("task_end_empty"), title=t("task_end_error")))
-        return
-
-    rounds = parts[1:]
-
-    # Parse user text for each round (simple extraction)
-    def extract_user_text(part: str) -> str:
-        marker = "**User:**"
-        idx = part.find(marker)
-        if idx == -1:
-            return ""
-        start = idx + len(marker)
-        # skip leading whitespace/newlines
-        sub = part[start:]
-        # end at next heading like '\n\n**' or end of part
-        end_idx = sub.find("\n\n**")
-        if end_idx == -1:
-            end_idx = len(sub)
-        return sub[:end_idx].strip()
-
-    # Find most recent round index where user contains /task-start
-    start_index = None
-    for i in range(len(rounds) - 1, -1, -1):
-        user_text = extract_user_text(rounds[i])
-        if "/task-start" in user_text:
-            start_index = i
-            break
-
-    if start_index is None:
-        console.print(Panel.fit(t("task_end_no_task_start"), title=t("task_end_notice")))
-        return
-
-    selected = rounds[start_index:]
-    compiled_text = "\n\n".join(["## Round " + r for r in selected])
-
-    # Build messages for the model
-    sys_prompt = f"""
-你是提示词优化专家，负责将对话记录整理为更清晰、可执行的最终任务提示词。
-
-### 生成最终提示词时，请严格遵循以下约束：
-1. 只输出最终改进后的提示词文本，不要添加任何解释、元信息或注释。
-2. 保留用户原始目标、关键上下文、澄清或变更后的要求、待执行步骤与预期产物。
-3. 语言必须清晰、可执行、步骤化，适合直接给后续执行器使用。
-4. 如果上下文中存在不确定信息，应显式写成“待确认”或“需验证”的约束项。
-5. 输出长度控制在 18000 字符以内。
-
-"""
-
-    user_prompt = f"""分析对话记录帮我生成最终提示词,把最终提示词内容输出给我。
-### 对话记录
-{compiled_text}
-"""
-
-    try:
-        assistant_message = chat_once(client, model, [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}], temperature=0.2, debug_enabled=debug_enabled, disable_tools=True)
-    except Exception:
-        logger.exception(t("task_end_generation_failed_log"))
-        console.print(Panel.fit(traceback.format_exc(), title=t("task_end_generate_failed")))
-        return
-    if assistant_message is None:
-        console.print(Panel.fit(t("task_end_no_prompt"), title=t("task_end_result")))
-        return
-    # Tools are disabled for this call, so tool_calls is expected to be empty.
-    prompt_call_tools = get_content_from_tool_calls(getattr(assistant_message, "tool_calls", None))
-    # console.print(f"{prompt_call_tools}")
-    final_prompt = ((assistant_message.content or "").strip() if hasattr(assistant_message, "content") else "")
-    if not final_prompt:
-        final_prompt = prompt_call_tools
-    if not final_prompt:
-        console.print(Panel.fit(t("task_end_no_prompt"), title=t("task_end_result")))
-        return
-
-    out_path = workdir / "last-prompt.md"
-    out_text = t("final_prompt_header") + "\n\n" + final_prompt + "\n"
-    out_path.write_text(out_text, encoding="utf-8")
-    console.print(Panel.fit(t("task_end_completed", path=out_path), title=t("task_end_done")))
-
-
-def interactive_loop(client: OpenAI, model: str, system_prompt: str, session_store: SessionStore, history_file: Path, debug_enabled: bool = False, recorder: ConversationRecorder | None = None, enable_planning: bool = True) -> None:
-    console.print(Panel.fit(
+def interactive_loop(client: OpenAI, model: str, system_prompt: str, history_file: Path, debug_enabled: bool = False) -> None:
+    print_section(
         "[bold green]Prompt Pilot CLI Coding Agent[/bold green]\n"
         + t("welcome_message") + "\n",
         title=t("startup_title"),
-    ))
+    )
 
-    slash_commands = ["/exit", "/clear", "/task-start", "/task-end"]
+    slash_commands = ["/exit", "/clear"]
     session = PromptSession(
         history=FileHistory(str(history_file)),
         completer=SlashCommandCompleter(slash_commands),
@@ -2574,19 +2368,11 @@ def interactive_loop(client: OpenAI, model: str, system_prompt: str, session_sto
             console.print(t("bye_message"))
             return
         if user_text.strip() == "/clear":
-            session_store.save([])
-            recent_conversations_path = ROOT / "recent_conversations.md"
-            if recent_conversations_path.exists():
-                recent_conversations_path.write_text(t("recent_conversations_header") + "\n\n", encoding="utf-8")
+            reset_conversation_history()
             console.print(t("clear_session_message"))
             continue
-        if user_text.strip() == "/task-end":
-            # Process recent_conversations.md and generate last-prompt.md
-            md_path = recorder.md_path if recorder else (ROOT / "recent_conversations.md")
-            handle_task_end_command(md_path, client, model, system_prompt, WORKSPACE_DIR, debug_enabled=debug_enabled)
-            continue
 
-        run_agent(client, model, system_prompt, session_store, user_text, debug_enabled=debug_enabled, recorder=recorder, enable_planning=enable_planning)
+        run_agent(client, model, system_prompt, user_text, debug_enabled=debug_enabled)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -2595,35 +2381,31 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("-t", "--task", help=t("task_argument_help"))
     parser.add_argument("-d", "--workdir", default=WORKSPACE_DIR, help=t("workdir_argument_help"))
     parser.add_argument("-l", "--lang", default="en", choices=["zh", "en"], help="language code for localization (zh / en, default: en)")
-    parser.add_argument("-amc", "--agent-messages-count", default=CHAT_MESSAGE_MAX_COUNT, help=f"number of messages to keep in agent history (default: {CHAT_MESSAGE_MAX_COUNT})")
     parser.add_argument("-rd", "--request-delay", default=RE_ACTION_DELAY, help=f"delay in seconds between model requests (default: {RE_ACTION_DELAY})")
-    parser.add_argument("-hc", "--history-count", default=DEFAULT_MAX_CHAT_COUNT, help=f"number of rounds to keep in conversation history (default: {DEFAULT_MAX_CHAT_COUNT})")
-    parser.add_argument("-np", "--no-plan", action="store_true", help=t("no_plan_help"))
-    parser.add_argument("--reset-session", action="store_true", help=t("reset_session_help"))
+    parser.add_argument("-b", "--bare", action="store_true", help=t("bare_argument_help"))
     return parser
 
 
 def main() -> None:
-    global UI_SYSTEM_LANGUAGE, DEFAULT_SYSTEM_PROMPT, WORKSPACE_DIR, RE_ACTION_DELAY, DEFAULT_MAX_CHAT_COUNT, CHAT_MESSAGE_MAX_COUNT
+    global UI_SYSTEM_LANGUAGE, DEFAULT_SYSTEM_PROMPT, WORKSPACE_DIR, RE_ACTION_DELAY, BARE_MODE
 
     parser = build_cli_parser()
     args = parser.parse_args()
 
     RE_ACTION_DELAY = int(args.request_delay)
-    DEFAULT_MAX_CHAT_COUNT = int(args.history_count)
-    CHAT_MESSAGE_MAX_COUNT = int(args.agent_messages_count)
+    BARE_MODE = bool(args.bare)
 
     # Set localization language
     UI_SYSTEM_LANGUAGE = args.lang
 
     # set up workspace directory
     WORKSPACE_DIR = Path(args.workdir)
-    console.print(Panel.fit(t("workdir_message", path=WORKSPACE_DIR), title=t("cli_config_title")))
+    print_section(t("workdir_message", path=WORKSPACE_DIR), title=t("cli_config_title"))
 
     try:
         model_cfg, system_prompt = ensure_config(workdir=WORKSPACE_DIR)
     except RuntimeError as exc:
-        console.print(Panel.fit(str(exc), title=t("config_error_title")))
+        print_section(str(exc), title=t("config_error_title"))
         return
 
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2635,48 +2417,36 @@ def main() -> None:
 
     mcp_tools = discover_mcp_tools(model_cfg)
     if mcp_tools:
-        console.print(Panel.fit(t("mcp_connected", count=len(mcp_tools)), title=t("mcp_config_title")))
+        print_section(t("mcp_connected", count=len(mcp_tools)), title=t("mcp_config_title"))
 
     try:
         client = build_client(model_cfg)
     except RuntimeError as exc:
-        console.print(Panel.fit(str(exc), title=t("config_error_title")))
+        print_section(str(exc), title=t("config_error_title"))
         return
 
-    session_file = ROOT / ".session_history.json"
     history_file = ROOT / ".history"
-
-    session_store = SessionStore(session_file, max_messages=DEFAULT_MAX_CHAT_COUNT)
-    if args.reset_session:
-        session_store.save([])
-        recent_conversations_path = ROOT / "recent_conversations.md"
-        if recent_conversations_path.exists():
-            recent_conversations_path.write_text(t("recent_conversations_header") + "\n\n", encoding="utf-8")
-        console.print(t("session_reset_message"))
 
     debug_enabled = bool(model_cfg.get("debug", False))
     if debug_enabled:
-        console.print(Panel.fit(t("debug_enabled_message"), title=t("debug_config_title")))
-
-    # Create conversation recorder to persist recent rounds to markdown
-    recorder = ConversationRecorder(ROOT / "recent_conversations.md", max_rounds=188)
+        print_section(t("debug_enabled_message"), title=t("debug_config_title"))
 
     if args.task:
         try:
-            run_agent(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, session_store, args.task, debug_enabled=debug_enabled, recorder=recorder, enable_planning=not args.no_plan)
+            run_agent(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, args.task, debug_enabled=debug_enabled)
         except KeyboardInterrupt:
-            console.print(Panel.fit(t("task_cancelled"), title=t("interrupted_title")))
+            print_section(t("task_cancelled"), title=t("interrupted_title"))
         return
 
     try:
-        interactive_loop(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, session_store, history_file, debug_enabled=debug_enabled, recorder=recorder, enable_planning=not args.no_plan)
+        interactive_loop(client, model_cfg.get("model", "gpt-4o-mini"), system_prompt, history_file, debug_enabled=debug_enabled)
     except KeyboardInterrupt:
-        console.print(Panel.fit(t("task_cancelled"), title=t("interrupted_title")))
+        print_section(t("task_cancelled"), title=t("interrupted_title"))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception:
-        console.print(Panel.fit(traceback.format_exc(), title=t("runtime_error_title")))
+        print_section(traceback.format_exc(), title=t("runtime_error_title"))
         sys.exit(1)
