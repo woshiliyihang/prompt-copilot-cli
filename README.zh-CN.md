@@ -7,12 +7,13 @@ Prompt Copilot CLI 是一个轻量级的终端编程 Agent，适合本地开发�
 ## ✨ 功能特性
 
 - 终端交互式 CLI
-- 内存中的对话上下文（保留最近 50 轮，程序退出即清空）
-- 文件系统工具：读取、写入、删除、重命名、复制、递归列出目录
-- 命令执行与 Python 脚本执行
+- 纯 ReAct 循环，配合内存中的对话上下文（保留最近 50 轮，程序退出即清空）
+- 文件系统工具：读取、写入、删除、重命名、复制、递归列出目录、文本搜索、定向替换
+- Python 脚本执行：前台运行，或以 `background` 参数以后台服务方式启动
 - 支持视觉模型的图片处理：将图片读取并转成 base64
 - MCP 工具集成，便于扩展外部能力
 - 模型输出流式显示，并内联过滤 `<think>` 标签
+- 可选的精简模式（`-b, --bare`）：不向上下文注入系统提示词与 function-calling 工具定义
 
 ## 🚀 快速开始
 
@@ -102,6 +103,12 @@ prompt-copilot
 prompt-copilot -t "创建一个简单的 HTML 落地页" -d D:\project_dir -l zh
 ```
 
+精简模式（不向上下文注入系统提示词与 function-calling 工具定义）：
+
+```powershell
+prompt-copilot -b
+```
+
 ## 🧭 使用说明
 
 ### 交互命令
@@ -119,10 +126,12 @@ prompt-copilot -h
 
 主要参数：
 
+- `-v, --version`：打印版本号后退出
 - `-t, --task`：一次性任务内容
 - `-d, --workdir`：工作目录
 - `-l, --lang`：语言（`zh` 或 `en`）
 - `-rd, --request-delay`：模型请求之间的间隔秒数
+- `-b, --bare`：精简模式，不向上下文注入系统提示词与 function-calling 工具定义
 
 ### 示例场景
 
@@ -161,9 +170,10 @@ Agent 可以调用这些工具：
   - `rename_path`
   - `copy_file`
   - `list_dir`（支持递归）
+  - `search_code`（递归文本模式搜索）
+  - `edit_file`（定向字符串替换）
 - 执行工具
-  - `execute_command`
-  - `execute_python_script`
+  - `execute_python_script`（前台运行，或通过 `background` 参数以后台服务方式启动）
 - 多模态工具
   - `read_image_as_base64`
 

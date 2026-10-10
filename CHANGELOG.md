@@ -2,11 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.8.0
 
-- Tool-call stage display now shows assistant reasoning instead of tool name and arguments
-- Task memory now records assistant reasoning when tool calls are initiated
-- Removed dead commented-out recorder and history-injection code
+- Switched the agent to a pure ReAct loop and removed the separate planning phase
+- Replaced persisted session/task memory with a simple in-memory conversation history capped at the last 50 rounds (cleared on exit); removed the persistence layer
+- Removed the `/task-start` and `/task-end` special commands (only `/exit` and `/clear` remain)
+- Streamed model responses with inline `<think>` tag filtering
+- Replaced boxed panel output with plain dashed section separators for easy copy/paste, and added a dashed `agent 回复 / Agent reply` header before replies
+- Dropped the verbose "start/finish model call" stage logs and cleaned up the resulting dead code and unused translations
+- Added the `-b, --bare` startup flag to omit the system prompt and function-calling tool definitions from the context
+- Removed dead code: unused `timezone` import, unused MCP backward-compat accessors, and unused translation keys
 - Fixed license metadata in `pyproject.toml` to match the Apache-2.0 LICENSE file
 
 ## 0.2.9

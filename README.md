@@ -7,12 +7,13 @@ It is designed for developers who want an interactive coding assistant that can 
 ## ✨ Features
 
 - Interactive CLI experience in the terminal
-- In-memory conversation context (keeps the last 50 rounds; cleared when the program exits)
-- File-system tools for reading, writing, deleting, renaming, copying, and recursive directory listing
-- Shell command execution and Python script execution
+- Pure ReAct loop backed by an in-memory conversation context (keeps the last 50 rounds; cleared when the program exits)
+- File-system tools for reading, writing, deleting, renaming, copying, recursive directory listing, text search, and targeted edits
+- Python script execution in the foreground or as a detached background service
 - Image support for vision-capable models via image-to-base64 conversion
 - MCP tool integration for extending the agent with external tools
 - Streaming model output with inline `<think>` tag filtering
+- Optional bare mode (`-b, --bare`) that omits the system prompt and function-calling tool definitions from the context
 
 ## 🚀 Quick Start
 
@@ -85,7 +86,7 @@ How it works:
 ### 4. Run the agent
 
 
-Normal node：
+Normal mode:
 
 ```powershell
 prompt-copilot -d D:\project_dir
@@ -101,6 +102,12 @@ One-off task mode:
 
 ```powershell
 prompt-copilot -t "Create a simple HTML landing page" -d ./workspace -l en
+```
+
+Bare mode (does not inject the system prompt or function-calling tool definitions into the context):
+
+```powershell
+prompt-copilot -b
 ```
 
 ## 🧭 Usage Guide
@@ -120,10 +127,12 @@ prompt-copilot -h
 
 Key options:
 
+- `-v, --version` — print the version and exit
 - `-t, --task` — one-off task content
 - `-d, --workdir` — working directory
 - `-l, --lang` — language (`zh` or `en`)
 - `-rd, --request-delay` — delay between model requests in seconds
+- `-b, --bare` — bare mode: omit the system prompt and function-calling tool definitions from the context
 
 ### Example workflows
 
@@ -162,9 +171,10 @@ The agent can call the following tools:
   - `rename_path`
   - `copy_file`
   - `list_dir` (with recursive option)
+  - `search_code` (recursive text pattern search)
+  - `edit_file` (targeted string replacement)
 - Execution tools
-  - `execute_command`
-  - `execute_python_script`
+  - `execute_python_script` (foreground, or a detached background service via `background`)
 - Multimodal tools
   - `read_image_as_base64`
 
